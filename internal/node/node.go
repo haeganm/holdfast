@@ -78,6 +78,7 @@ type Counters struct {
 	SyncOK       int64 `json:"sync_ok"`
 	SyncErr      int64 `json:"sync_err"`
 	Rejected     int64 `json:"rejected"`  // inbound messages refused at the trust boundary
+	Aborted      int64 `json:"aborted"`   // inbound requests cut off before the whole body arrived
 	BytesOut     int64 `json:"bytes_out"` // request bodies this node sent as initiator, for answered requests
 	BytesIn      int64 `json:"bytes_in"`  // response bodies this node received as initiator
 }
@@ -85,7 +86,7 @@ type Counters struct {
 type counters struct {
 	ingestTotal, ingestLost                atomic.Int64
 	mergeApplied, mergeStale, mergeRegress atomic.Int64
-	syncOK, syncErr, rejected              atomic.Int64
+	syncOK, syncErr, rejected, aborted     atomic.Int64
 	bytesOut, bytesIn                      atomic.Int64
 }
 
@@ -425,9 +426,12 @@ func (n *Node) handlePush(w http.ResponseWriter, r *http.Request) {
 }
 
 // decode reads one JSON message with a size limit, rejecting unknown fields
-// and a sender id that could not be a node.
+// and a sender id that could not be a node. A body the connection cut off
+// (the sender timed out, or the link dropped it) is counted as aborted, not
+// rejected: nothing judged it, it just never arrived.
 func (n *Node) decode(w http.ResponseWriter, r *http.Request, v interface{ from() string }) bool {
-	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
+	body := &readErr{ReadCloser: r.Body}
+	r.Body = http.MaxBytesReader(w, body, maxBody)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	err := dec.Decode(v)
@@ -437,7 +441,11 @@ func (n *Node) decode(w http.ResponseWriter, r *http.Request, v interface{ from(
 	if err == nil {
 		return true
 	}
-	n.c.rejected.Add(1)
+	if body.err != nil {
+		n.c.aborted.Add(1)
+	} else {
+		n.c.rejected.Add(1)
+	}
 	status := http.StatusBadRequest
 	var tooBig *http.MaxBytesError
 	if errors.As(err, &tooBig) {
@@ -445,6 +453,22 @@ func (n *Node) decode(w http.ResponseWriter, r *http.Request, v interface{ from(
 	}
 	http.Error(w, fmt.Sprintf("%s: %v", r.URL.Path, err), status)
 	return false
+}
+
+// readErr keeps the first error the transport returned while the body was
+// read. A complete body that is bad JSON can also end in "unexpected EOF",
+// so the decode error alone can't tell a cut-off request from a malformed one.
+type readErr struct {
+	io.ReadCloser
+	err error
+}
+
+func (r *readErr) Read(p []byte) (int, error) {
+	k, err := r.ReadCloser.Read(p)
+	if err != nil && err != io.EOF && r.err == nil {
+		r.err = err
+	}
+	return k, err
 }
 
 func (r *syncRequest) from() string { return r.From }
@@ -496,7 +520,7 @@ func (n *Node) Counters() Counters {
 	return Counters{
 		IngestTotal: c.ingestTotal.Load(), IngestLost: c.ingestLost.Load(),
 		MergeApplied: c.mergeApplied.Load(), MergeStale: c.mergeStale.Load(), MergeRegress: c.mergeRegress.Load(),
-		SyncOK: c.syncOK.Load(), SyncErr: c.syncErr.Load(), Rejected: c.rejected.Load(),
+		SyncOK: c.syncOK.Load(), SyncErr: c.syncErr.Load(), Rejected: c.rejected.Load(), Aborted: c.aborted.Load(),
 		BytesOut: c.bytesOut.Load(), BytesIn: c.bytesIn.Load(),
 	}
 }
@@ -522,6 +546,7 @@ func (n *Node) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 		{"holdfast_sync_requests_total", "counter", "Sync rounds by outcome.", `result="ok"`, c.SyncOK},
 		{"holdfast_sync_requests_total", "counter", "", `result="err"`, c.SyncErr},
 		{"holdfast_rejected_total", "counter", "Inbound messages refused at the trust boundary.", "", c.Rejected},
+		{"holdfast_aborted_total", "counter", "Inbound requests cut off before the whole body arrived.", "", c.Aborted},
 		{"holdfast_sync_bytes_total", "counter", "Message body bytes as initiator.", `dir="out"`, c.BytesOut},
 		{"holdfast_sync_bytes_total", "counter", "", `dir="in"`, c.BytesIn},
 	}

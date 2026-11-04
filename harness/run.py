@@ -472,6 +472,7 @@ def analyze(run: Run, polls_path: Path) -> dict:
         "sync_ok": totals.get("sync_ok", 0), "sync_err": totals.get("sync_err", 0),
         "sync_err_rate": round(totals.get("sync_err", 0) / sync_total, 4) if sync_total else "",
         "rejected": totals.get("rejected", 0),
+        "aborted": totals.get("aborted", 0),  # cut off in flight; added after the predictions
         "wire_bytes_per_obs": wire,
         "polls": len(run.polls), "poll_ms_mean": round(sum(gaps) / len(gaps), 1) if gaps else "",
         "vm_offset_ms": run.vm_offset_ms, "commit": run.commit, "errors": " | ".join(run.errors),

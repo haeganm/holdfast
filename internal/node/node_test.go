@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -402,5 +403,43 @@ func TestStateReportsOwnObservations(t *testing.T) {
 	tr := st.Tracks["ABCDEF"]
 	if st.ID != "a" || tr.At != 42 || tr.Own != 42 || tr.Origin != "a" || st.Hash != n.Hash() {
 		t.Fatalf("unexpected state %+v", st)
+	}
+}
+
+// Under packet loss a sender's 2 s timeout can fire mid-upload, and the
+// receiver sees a body that stops short. That is the network failing, not a
+// peer sending something bad, so it must not count against the trust boundary.
+// The same broken JSON delivered whole is still a rejection.
+func TestCutOffBodyIsAbortedNotRejected(t *testing.T) {
+	part := `{"from":"b","hlc":`
+	for _, tc := range []struct {
+		name          string
+		contentLength int
+		rejected      int64
+		aborted       int64
+	}{
+		{"connection drops mid-body", 1000, 0, 1},
+		{"complete body, truncated JSON", len(part), 1, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			n, srv := newLoneNode(t)
+			conn, err := net.Dial("tcp", strings.TrimPrefix(srv.URL, "http://"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			fmt.Fprintf(conn, "POST /push HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", tc.contentLength, part)
+			if tc.aborted > 0 {
+				conn.Close()
+			} else {
+				defer conn.Close()
+			}
+			waitFor(t, "the server to give up on the body", func() bool {
+				c := n.Counters()
+				return c.Rejected+c.Aborted > 0
+			})
+			if c := n.Counters(); c.Rejected != tc.rejected || c.Aborted != tc.aborted {
+				t.Fatalf("rejected=%d aborted=%d, want %d and %d", c.Rejected, c.Aborted, tc.rejected, tc.aborted)
+			}
+		})
 	}
 }
