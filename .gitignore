@@ -1,0 +1,8 @@
+/results/*
+!/results/.gitkeep
+/harness/.venv/
+__pycache__/
+/holdfast
+/holdfast.exe
+/gentrace
+/gentrace.exe

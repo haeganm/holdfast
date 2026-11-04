@@ -1,0 +1,531 @@
+// Package node runs one edge node: it stamps local observations with its
+// hybrid logical clock, keeps a replica of the fused picture, and syncs with
+// peers by anti-entropy over HTTP.
+//
+// Every exchange is idempotent, so a lost request is never retried: the next
+// tick is the retry. That is what lets the protocol run over a link that drops
+// half its packets without any extra machinery.
+package node
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"math"
+	"math/rand/v2"
+	"net/http"
+	"regexp"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/haeganm/holdfast/internal/crdt"
+	"github.com/haeganm/holdfast/internal/hlc"
+)
+
+const (
+	maxBody    = 4 << 20 // bytes per request or response body
+	maxEntries = 10_000  // aircraft per digest or track batch
+)
+
+var (
+	icaoRe   = regexp.MustCompile(`^[0-9A-F]{6}$`)
+	originRe = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
+)
+
+// Config describes a node. Zero values for SyncInterval, MaxDrift, Client,
+// Now and Logger get the defaults noted on each field.
+type Config struct {
+	ID           string        // short lowercase name, also the Origin of its writes
+	Peers        []string      // base URLs, such as http://172.30.0.12:8080
+	SyncInterval time.Duration // per peer; default 1s
+	Wall         bool          // stamp with the plain wall clock (the baseline) instead of the HLC
+
+	// ClockOffset skews the physical clock that drives the HLC, to simulate a
+	// node whose clock is wrong. Measurement always uses true time.
+	ClockOffset time.Duration
+
+	// MaxDrift bounds how far ahead of this node's physical clock a remote
+	// stamp may be. Without it one peer with a broken clock drags every HLC
+	// forward and wins every merge. Default 5s.
+	MaxDrift time.Duration
+
+	Client *http.Client     // default: 2s timeout
+	Now    func() time.Time // true time; default time.Now
+	Logger *slog.Logger     // default: discard
+}
+
+// Counters are cumulative since start.
+type Counters struct {
+	IngestTotal  int64 `json:"ingest_total"`
+	IngestLost   int64 `json:"ingest_lost"`   // a local observation lost to an older one already stored
+	MergeApplied int64 `json:"merge_applied"` // a received track won its merge
+	MergeStale   int64 `json:"merge_stale"`   // a received track lost or was a redelivery
+	MergeRegress int64 `json:"merge_regress"` // a received track won but was older than what it replaced
+	SyncOK       int64 `json:"sync_ok"`
+	SyncErr      int64 `json:"sync_err"`
+	Rejected     int64 `json:"rejected"`  // inbound messages refused at the trust boundary
+	BytesOut     int64 `json:"bytes_out"` // request bodies this node sent as initiator
+	BytesIn      int64 `json:"bytes_in"`  // response bodies this node received as initiator
+}
+
+type counters struct {
+	ingestTotal, ingestLost                atomic.Int64
+	mergeApplied, mergeStale, mergeRegress atomic.Int64
+	syncOK, syncErr, rejected              atomic.Int64
+	bytesOut, bytesIn                      atomic.Int64
+}
+
+// Node is one edge node.
+type Node struct {
+	id       string
+	peers    []string
+	interval time.Duration
+	maxDrift time.Duration
+	trueNow  func() time.Time
+	physNow  func() time.Time
+	clock    *hlc.Clock
+	tracks   *crdt.Map
+	client   *http.Client
+	log      *slog.Logger
+	c        counters
+
+	// mu serializes the two write paths, stamp-then-put and
+	// advance-clock-then-merge. Together they keep the invariant that every
+	// stamp in the replica is at or below the clock, so a local write under
+	// the HLC always sorts after everything this node has already seen.
+	mu  sync.Mutex
+	own map[crdt.ICAO]int64 // latest ObservedAtMS this node ingested itself, per aircraft
+}
+
+func New(cfg Config) (*Node, error) {
+	if !originRe.MatchString(cfg.ID) {
+		return nil, fmt.Errorf("node id %q: want 1-32 of [a-z0-9-]", cfg.ID)
+	}
+	if cfg.SyncInterval == 0 {
+		cfg.SyncInterval = time.Second
+	}
+	if cfg.MaxDrift == 0 {
+		cfg.MaxDrift = 5 * time.Second
+	}
+	if cfg.SyncInterval < 0 || cfg.MaxDrift < 0 {
+		return nil, errors.New("sync interval and max drift must be positive")
+	}
+	if cfg.Client == nil {
+		cfg.Client = &http.Client{Timeout: 2 * time.Second}
+	}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
+	if cfg.Logger == nil {
+		cfg.Logger = slog.New(slog.DiscardHandler)
+	}
+	trueNow, offset := cfg.Now, cfg.ClockOffset
+	physNow := func() time.Time { return trueNow().Add(offset) }
+	return &Node{
+		id:       cfg.ID,
+		peers:    cfg.Peers,
+		interval: cfg.SyncInterval,
+		maxDrift: cfg.MaxDrift,
+		trueNow:  trueNow,
+		physNow:  physNow,
+		clock:    hlc.New(physNow, cfg.Wall),
+		tracks:   crdt.NewMap(),
+		client:   cfg.Client,
+		log:      cfg.Logger.With("node", cfg.ID),
+		own:      map[crdt.ICAO]int64{},
+	}, nil
+}
+
+// Ingest stamps a local observation and merges it into the replica.
+func (n *Node) Ingest(id crdt.ICAO, obs crdt.Observation) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	won, prev := n.tracks.Put(id, crdt.Track{Obs: obs, TS: n.clock.Now(), Origin: n.id})
+	n.c.ingestTotal.Add(1)
+	if !won && prev.Obs.ObservedAtMS < obs.ObservedAtMS {
+		n.c.ingestLost.Add(1)
+	}
+	if obs.ObservedAtMS > n.own[id] {
+		n.own[id] = obs.ObservedAtMS
+	}
+}
+
+// receive validates a message from a peer, advances the clock past every
+// stamp in it, then merges its tracks. The clock moves first, under the same
+// lock as the merge, so no local write can be stamped below a merged track.
+func (n *Node) receive(msgTS hlc.Timestamp, tracks map[crdt.ICAO]crdt.Track) error {
+	if err := n.validate(msgTS, tracks); err != nil {
+		n.c.rejected.Add(1)
+		return err
+	}
+	high := msgTS
+	for _, t := range tracks {
+		if t.TS.Compare(high) > 0 {
+			high = t.TS
+		}
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.clock.Update(high)
+	for id, t := range tracks {
+		won, prev := n.tracks.Put(id, t)
+		switch {
+		case !won:
+			n.c.mergeStale.Add(1)
+		case prev.Origin != "" && t.Obs.ObservedAtMS < prev.Obs.ObservedAtMS:
+			n.c.mergeApplied.Add(1)
+			n.c.mergeRegress.Add(1)
+		default:
+			n.c.mergeApplied.Add(1)
+		}
+	}
+	return nil
+}
+
+// validate is the trust boundary for anything a peer sends.
+func (n *Node) validate(msgTS hlc.Timestamp, tracks map[crdt.ICAO]crdt.Track) error {
+	limit := n.physNow().Add(n.maxDrift).UnixMilli()
+	if err := checkStamp(msgTS, limit); err != nil {
+		return fmt.Errorf("message stamp: %w", err)
+	}
+	if len(tracks) > maxEntries {
+		return fmt.Errorf("%d tracks in one message, limit %d", len(tracks), maxEntries)
+	}
+	for id, t := range tracks {
+		if err := checkTrack(id, t, limit); err != nil {
+			return fmt.Errorf("track %q: %w", id, err)
+		}
+	}
+	return nil
+}
+
+func checkStamp(ts hlc.Timestamp, limit int64) error {
+	if ts.WallMS > limit {
+		return fmt.Errorf("stamp %v is more than the allowed drift ahead of this node's clock (limit %d)", ts, limit)
+	}
+	if ts.WallMS < 0 {
+		return fmt.Errorf("negative stamp %v", ts)
+	}
+	return nil
+}
+
+func checkTrack(id crdt.ICAO, t crdt.Track, limit int64) error {
+	if !icaoRe.MatchString(string(id)) {
+		return errors.New("aircraft id must be six uppercase hex digits")
+	}
+	if !originRe.MatchString(t.Origin) {
+		return fmt.Errorf("origin %q: want 1-32 of [a-z0-9-]", t.Origin)
+	}
+	if err := checkStamp(t.TS, limit); err != nil {
+		return err
+	}
+	o := t.Obs
+	for _, f := range []float64{o.Lat, o.Lon, o.AltFt, o.GSKt, o.HeadingDeg} {
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			return errors.New("non-finite number in observation")
+		}
+	}
+	if o.Lat < -90 || o.Lat > 90 || o.Lon < -180 || o.Lon > 180 {
+		return fmt.Errorf("position %v,%v out of range", o.Lat, o.Lon)
+	}
+	return nil
+}
+
+func checkDigest(d map[crdt.ICAO]crdt.Version) error {
+	if len(d) > maxEntries {
+		return fmt.Errorf("%d digest entries, limit %d", len(d), maxEntries)
+	}
+	for id, v := range d {
+		if !icaoRe.MatchString(string(id)) {
+			return fmt.Errorf("digest aircraft id %q must be six uppercase hex digits", id)
+		}
+		if !originRe.MatchString(v.Origin) {
+			return fmt.Errorf("digest origin %q for %s: want 1-32 of [a-z0-9-]", v.Origin, id)
+		}
+	}
+	return nil
+}
+
+// Run syncs with every peer, one loop per peer so a dead peer's timeouts
+// never slow the others, until ctx is done.
+func (n *Node) Run(ctx context.Context) {
+	var wg sync.WaitGroup
+	for _, p := range n.peers {
+		wg.Go(func() { n.syncLoop(ctx, p) })
+	}
+	wg.Wait()
+}
+
+func (n *Node) syncLoop(ctx context.Context, peer string) {
+	timer := time.NewTimer(rand.N(n.interval)) // spread the first sync so loops don't run in lockstep
+	defer timer.Stop()
+	failing := false
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		err := n.syncOnce(ctx, peer)
+		switch {
+		case err != nil:
+			n.c.syncErr.Add(1)
+			if !failing && ctx.Err() == nil {
+				n.log.Warn("peer unreachable", "peer", peer, "err", err)
+			}
+			failing = true
+		default:
+			n.c.syncOK.Add(1)
+			if failing {
+				n.log.Info("peer reachable again", "peer", peer)
+			}
+			failing = false
+		}
+		timer.Reset(n.interval)
+	}
+}
+
+type syncRequest struct {
+	From   string                     `json:"from"`
+	HLC    hlc.Timestamp              `json:"hlc"`
+	Digest map[crdt.ICAO]crdt.Version `json:"digest"`
+}
+
+type syncResponse struct {
+	HLC    hlc.Timestamp            `json:"hlc"`
+	Tracks map[crdt.ICAO]crdt.Track `json:"tracks"`
+	Want   []crdt.ICAO              `json:"want"`
+}
+
+type pushRequest struct {
+	From   string                   `json:"from"`
+	HLC    hlc.Timestamp            `json:"hlc"`
+	Tracks map[crdt.ICAO]crdt.Track `json:"tracks"`
+}
+
+// syncOnce is one anti-entropy round: send my digest, merge what the peer
+// says I'm missing, then send what the peer says it's missing.
+func (n *Node) syncOnce(ctx context.Context, peer string) error {
+	req := syncRequest{From: n.id, HLC: n.clock.Now(), Digest: n.tracks.Digest()}
+	var resp syncResponse
+	if err := n.post(ctx, peer+"/sync", req, &resp); err != nil {
+		return err
+	}
+	if err := n.receive(resp.HLC, resp.Tracks); err != nil {
+		return fmt.Errorf("%s/sync response: %w", peer, err)
+	}
+	if len(resp.Want) == 0 {
+		return nil
+	}
+	if len(resp.Want) > maxEntries {
+		return fmt.Errorf("%s/sync asked for %d tracks, limit %d", peer, len(resp.Want), maxEntries)
+	}
+	push := pushRequest{From: n.id, HLC: n.clock.Now(), Tracks: n.tracks.Get(resp.Want)}
+	return n.post(ctx, peer+"/push", push, nil)
+}
+
+func (n *Node) post(ctx context.Context, url string, in, out any) error {
+	body, err := json.Marshal(in)
+	if err != nil {
+		return fmt.Errorf("encode request for %s: %w", url, err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	n.c.bytesOut.Add(int64(len(body)))
+	resp, err := n.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
+	n.c.bytesIn.Add(int64(len(data)))
+	if err != nil {
+		return fmt.Errorf("read response from %s: %w", url, err)
+	}
+	if len(data) > maxBody {
+		return fmt.Errorf("response from %s exceeds %d bytes", url, maxBody)
+	}
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("%s: %s: %s", url, resp.Status, bytes.TrimSpace(data[:min(len(data), 200)]))
+	}
+	if out == nil {
+		return nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(out); err != nil {
+		return fmt.Errorf("decode response from %s: %w", url, err)
+	}
+	return nil
+}
+
+// Handler serves the sync protocol and the observation endpoints.
+func (n *Node) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /sync", n.handleSync)
+	mux.HandleFunc("POST /push", n.handlePush)
+	mux.HandleFunc("GET /hash", n.handleHash)
+	mux.HandleFunc("GET /state", n.handleState)
+	mux.HandleFunc("GET /metrics", n.handleMetrics)
+	return mux
+}
+
+func (n *Node) handleSync(w http.ResponseWriter, r *http.Request) {
+	var req syncRequest
+	if !n.decode(w, r, &req) {
+		return
+	}
+	if err := checkDigest(req.Digest); err != nil {
+		n.c.rejected.Add(1)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := n.receive(req.HLC, nil); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	newer, want := n.tracks.Diff(req.Digest)
+	writeJSON(w, syncResponse{HLC: n.clock.Now(), Tracks: newer, Want: want})
+}
+
+func (n *Node) handlePush(w http.ResponseWriter, r *http.Request) {
+	var req pushRequest
+	if !n.decode(w, r, &req) {
+		return
+	}
+	if err := n.receive(req.HLC, req.Tracks); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// decode reads one JSON message with a size limit, rejecting unknown fields
+// and a sender id that could not be a node.
+func (n *Node) decode(w http.ResponseWriter, r *http.Request, v interface{ from() string }) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	err := dec.Decode(v)
+	if err == nil && !originRe.MatchString(v.from()) {
+		err = fmt.Errorf("sender id %q: want 1-32 of [a-z0-9-]", v.from())
+	}
+	if err == nil {
+		return true
+	}
+	n.c.rejected.Add(1)
+	status := http.StatusBadRequest
+	var tooBig *http.MaxBytesError
+	if errors.As(err, &tooBig) {
+		status = http.StatusRequestEntityTooLarge
+	}
+	http.Error(w, fmt.Sprintf("%s: %v", r.URL.Path, err), status)
+	return false
+}
+
+func (r *syncRequest) from() string { return r.From }
+func (r *pushRequest) from() string { return r.From }
+
+// Hash is the hash of the current replica.
+func (n *Node) Hash() string { return n.tracks.Hash() }
+
+func (n *Node) handleHash(w http.ResponseWriter, _ *http.Request) {
+	snap := n.tracks.Snapshot()
+	writeJSON(w, map[string]any{"hash": crdt.HashOf(snap), "n": len(snap)})
+}
+
+// State is what the experiment harness polls.
+type State struct {
+	ID       string                   `json:"id"`
+	NowMS    int64                    `json:"now_ms"` // true time, not the skewed clock
+	Hash     string                   `json:"hash"`
+	Counters Counters                 `json:"counters"`
+	Tracks   map[crdt.ICAO]StateTrack `json:"tracks"`
+}
+
+type StateTrack struct {
+	TS     hlc.Timestamp `json:"ts"`
+	Origin string        `json:"origin"`
+	At     int64         `json:"at"`            // when the stored observation was made
+	Own    int64         `json:"own,omitempty"` // latest observation this node made itself, if any
+}
+
+// Snapshot returns the replica, this node's own latest observations and the
+// counters, taken together so they agree with each other.
+func (n *Node) Snapshot() State {
+	n.mu.Lock()
+	snap := n.tracks.Snapshot()
+	tracks := make(map[crdt.ICAO]StateTrack, len(snap))
+	for id, t := range snap {
+		tracks[id] = StateTrack{TS: t.TS, Origin: t.Origin, At: t.Obs.ObservedAtMS, Own: n.own[id]}
+	}
+	n.mu.Unlock()
+	return State{ID: n.id, NowMS: n.trueNow().UnixMilli(), Hash: crdt.HashOf(snap), Counters: n.Counters(), Tracks: tracks}
+}
+
+func (n *Node) handleState(w http.ResponseWriter, _ *http.Request) { writeJSON(w, n.Snapshot()) }
+
+// Counters returns a copy of the counters.
+func (n *Node) Counters() Counters {
+	c := &n.c
+	return Counters{
+		IngestTotal: c.ingestTotal.Load(), IngestLost: c.ingestLost.Load(),
+		MergeApplied: c.mergeApplied.Load(), MergeStale: c.mergeStale.Load(), MergeRegress: c.mergeRegress.Load(),
+		SyncOK: c.syncOK.Load(), SyncErr: c.syncErr.Load(), Rejected: c.rejected.Load(),
+		BytesOut: c.bytesOut.Load(), BytesIn: c.bytesIn.Load(),
+	}
+}
+
+// handleMetrics writes the Prometheus text format by hand: a dozen series do
+// not justify the client library, the module's only dependency it would be.
+func (n *Node) handleMetrics(w http.ResponseWriter, _ *http.Request) {
+	c := n.Counters()
+	last := n.clock.Peek()
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	series := []struct {
+		name, kind, help, labels string
+		v                        int64
+	}{
+		{"holdfast_tracks", "gauge", "Aircraft in this node's picture.", "", int64(n.tracks.Len())},
+		{"holdfast_hlc_wall_ms", "gauge", "Wall part of the latest clock stamp.", "", last.WallMS},
+		{"holdfast_hlc_logical", "gauge", "Logical part of the latest clock stamp.", "", int64(last.Logical)},
+		{"holdfast_ingest_total", "counter", "Local observations ingested.", "", c.IngestTotal},
+		{"holdfast_ingest_lost_total", "counter", "Local observations that lost to an older stored one.", "", c.IngestLost},
+		{"holdfast_merge_applied_total", "counter", "Received tracks that won their merge.", "", c.MergeApplied},
+		{"holdfast_merge_stale_total", "counter", "Received tracks that lost or were redeliveries.", "", c.MergeStale},
+		{"holdfast_merge_regress_total", "counter", "Received tracks that won but were older than what they replaced.", "", c.MergeRegress},
+		{"holdfast_sync_requests_total", "counter", "Sync rounds by outcome.", `result="ok"`, c.SyncOK},
+		{"holdfast_sync_requests_total", "counter", "", `result="err"`, c.SyncErr},
+		{"holdfast_rejected_total", "counter", "Inbound messages refused at the trust boundary.", "", c.Rejected},
+		{"holdfast_sync_bytes_total", "counter", "Message body bytes as initiator.", `dir="out"`, c.BytesOut},
+		{"holdfast_sync_bytes_total", "counter", "", `dir="in"`, c.BytesIn},
+	}
+	var b bytes.Buffer
+	for _, s := range series {
+		if s.help != "" {
+			fmt.Fprintf(&b, "# HELP %s %s\n# TYPE %s %s\n", s.name, s.help, s.name, s.kind)
+		}
+		if s.labels != "" {
+			fmt.Fprintf(&b, "%s{%s} %d\n", s.name, s.labels, s.v)
+		} else {
+			fmt.Fprintf(&b, "%s %d\n", s.name, s.v)
+		}
+	}
+	w.Write(b.Bytes())
+}
+
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		// The status line is already sent; the client will see a truncated body.
+		slog.Default().Warn("write response", "err", err)
+	}
+}
