@@ -23,6 +23,8 @@ func genTrack(r *rand.Rand) Track {
 			Lat:          small[r.IntN(len(small))],
 			Lon:          small[r.IntN(len(small))],
 			AltFt:        float64(r.IntN(2)),
+			GSKt:         float64(r.IntN(2)),
+			HeadingDeg:   float64(r.IntN(2)),
 			ObservedAtMS: int64(r.IntN(3)),
 		},
 		TS:     hlc.Timestamp{WallMS: int64(r.IntN(4)), Logical: uint32(r.IntN(2))},

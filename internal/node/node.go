@@ -28,8 +28,21 @@ import (
 )
 
 const (
-	maxBody    = 4 << 20 // bytes per request or response body
-	maxEntries = 10_000  // aircraft per digest or track batch
+	maxBody = 4 << 20 // bytes per request or response body
+
+	// ponytail: a digest carries the whole replica, so past maxEntries
+	// aircraft every sync is rejected and replicas stop converging (a peer
+	// can force that with two pushes). Paging the digest, or Merkle ranges,
+	// is the upgrade when the picture outgrows it.
+	maxEntries = 10_000 // aircraft per digest or track batch
+
+	// maxLogical bounds the logical part of a remote stamp. A local clock's
+	// logical counter only grows while its physical clock trails the latest
+	// stamp, and MaxDrift bounds that window, so honest stamps stay many
+	// orders of magnitude below this. Without the bound, a stamp near
+	// MaxUint32 wraps the receiving clock to zero, below the track it just
+	// stored.
+	maxLogical = 1 << 20
 )
 
 var (
@@ -51,7 +64,10 @@ type Config struct {
 
 	// MaxDrift bounds how far ahead of this node's physical clock a remote
 	// stamp may be. Without it one peer with a broken clock drags every HLC
-	// forward and wins every merge. Default 5s.
+	// forward and wins every merge. A message with any stamp past the bound
+	// is rejected whole. Since HLCs drag each other forward, convergence
+	// needs the spread between the fastest and slowest physical clock in the
+	// system to stay under MaxDrift. Default 5s.
 	MaxDrift time.Duration
 
 	Client *http.Client     // default: 2s timeout
@@ -210,6 +226,9 @@ func checkStamp(ts hlc.Timestamp, limit int64) error {
 	}
 	if ts.WallMS < 0 {
 		return fmt.Errorf("negative stamp %v", ts)
+	}
+	if ts.Logical > maxLogical {
+		return fmt.Errorf("stamp %v has a logical part over %d", ts, maxLogical)
 	}
 	return nil
 }
@@ -467,8 +486,9 @@ func (n *Node) Snapshot() State {
 	for id, t := range snap {
 		tracks[id] = StateTrack{TS: t.TS, Origin: t.Origin, At: t.Obs.ObservedAtMS, Own: n.own[id]}
 	}
+	counters := n.Counters() // the merge and ingest counters only move under mu
 	n.mu.Unlock()
-	return State{ID: n.id, NowMS: n.trueNow().UnixMilli(), Hash: crdt.HashOf(snap), Counters: n.Counters(), Tracks: tracks}
+	return State{ID: n.id, NowMS: n.trueNow().UnixMilli(), Hash: crdt.HashOf(snap), Counters: counters, Tracks: tracks}
 }
 
 func (n *Node) handleState(w http.ResponseWriter, _ *http.Request) { writeJSON(w, n.Snapshot()) }

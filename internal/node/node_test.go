@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -193,6 +195,11 @@ func TestTrustBoundaryRejectsBadMessages(t *testing.T) {
 		return body
 	}
 	far := hlc.Timestamp{WallMS: nowMS + time.Hour.Milliseconds()}
+	wrap := hlc.Timestamp{WallMS: nowMS, Logical: math.MaxUint32}
+	tooMany := map[crdt.ICAO]crdt.Track{}
+	for i := range maxEntries + 1 {
+		tooMany[crdt.ICAO(fmt.Sprintf("%06X", i))] = good
+	}
 	withTS := func(tr crdt.Track, ts hlc.Timestamp) crdt.Track { tr.TS = ts; return tr }
 	withLat := func(tr crdt.Track, lat float64) crdt.Track { tr.Obs.Lat = lat; return tr }
 	withOrigin := func(tr crdt.Track, o string) crdt.Track { tr.Origin = o; return tr }
@@ -207,6 +214,8 @@ func TestTrustBoundaryRejectsBadMessages(t *testing.T) {
 		{"lowercase aircraft id", "/push", push(map[crdt.ICAO]crdt.Track{"abcdef": good}, now), 400},
 		{"track stamp an hour ahead", "/push", push(map[crdt.ICAO]crdt.Track{"ABCDEF": withTS(good, far)}, now), 400},
 		{"message stamp an hour ahead", "/push", push(map[crdt.ICAO]crdt.Track{"ABCDEF": good}, far), 400},
+		{"logical part that would wrap the clock", "/push", push(map[crdt.ICAO]crdt.Track{"ABCDEF": withTS(good, wrap)}, now), 400},
+		{"more tracks than one message may carry", "/push", push(tooMany, now), 400},
 		{"latitude out of range", "/push", push(map[crdt.ICAO]crdt.Track{"ABCDEF": withLat(good, 200)}, now), 400},
 		{"bad origin", "/push", push(map[crdt.ICAO]crdt.Track{"ABCDEF": withOrigin(good, "B; DROP")}, now), 400},
 		{"unknown field", "/push", []byte(`{"from":"b","hlc":{"w":1,"l":0},"tracks":{},"admin":true}`), 400},
@@ -241,6 +250,90 @@ func TestTrustBoundaryRejectsBadMessages(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent || n.tracks.Len() != 1 {
 		t.Fatalf("a valid push got %d and left %d tracks, want 204 and 1", resp.StatusCode, n.tracks.Len())
+	}
+}
+
+// A peer's message stamp can be older than a track it carries (the push stamp
+// is taken before the tracks are gathered, and a merge can land in between).
+// The clock must still move past the track, or the next local write loses.
+func TestClockAdvancesPastTrackStampsNotJustTheMessageStamp(t *testing.T) {
+	n, _ := newLoneNode(t)
+	now := time.Now().UnixMilli()
+	ahead := hlc.Timestamp{WallMS: now + 1000}
+	err := n.receive(hlc.Timestamp{WallMS: now - 1000}, map[crdt.ICAO]crdt.Track{
+		"AAAAA1": {Obs: obs(1), TS: ahead, Origin: "b"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n.Ingest("AAAAA1", obs(2))
+	if got := n.Counters().IngestLost; got != 0 {
+		t.Fatalf("ingest_lost = %d: the local write was stamped below a track the node had already merged", got)
+	}
+	if got := n.tracks.Snapshot()["AAAAA1"].Origin; got != "a" {
+		t.Fatalf("kept origin %q, want the local write", got)
+	}
+}
+
+// Ingest must stamp and store under the same lock that receive holds while
+// it advances the clock and merges. This forces a receive to arrive exactly
+// between an Ingest's stamp and its store: with the lock held, the receive
+// waits and the local write wins; stamped outside the lock, the receive
+// slips in and the local write loses.
+func TestIngestStampsUnderTheLock(t *testing.T) {
+	var armed atomic.Bool
+	var n *Node
+	done := make(chan struct{})
+	ahead := time.Now().Add(time.Second).UnixMilli()
+	clock := func() time.Time {
+		if armed.CompareAndSwap(true, false) {
+			go func() {
+				defer close(done)
+				err := n.receive(hlc.Timestamp{WallMS: ahead}, map[crdt.ICAO]crdt.Track{
+					"AAAAA1": {Obs: obs(1), TS: hlc.Timestamp{WallMS: ahead}, Origin: "b"},
+				})
+				if err != nil {
+					t.Error(err)
+				}
+			}()
+			select {
+			case <-done: // only possible if Ingest is not holding the lock
+			case <-time.After(50 * time.Millisecond):
+			}
+		}
+		return time.Now()
+	}
+	var err error
+	n, err = New(Config{ID: "a", Now: clock})
+	if err != nil {
+		t.Fatal(err)
+	}
+	armed.Store(true)
+	n.Ingest("AAAAA1", obs(2))
+	<-done
+	if got := n.Counters().IngestLost; got != 0 {
+		t.Fatalf("ingest_lost = %d: a merge landed between the stamp and the store", got)
+	}
+}
+
+// merge_regress feeds the clock-skew figure, so it has to count, not just
+// stay at zero: a received track that wins by stamp but carries an older
+// observation than the one it replaces is one regress.
+func TestMergeRegressCountsAStaleWinner(t *testing.T) {
+	n, _ := newLoneNode(t)
+	now := time.Now().UnixMilli()
+	for _, tr := range []crdt.Track{
+		{Obs: obs(2), TS: hlc.Timestamp{WallMS: now - 100}, Origin: "b"}, // the fresher report, lower stamp
+		{Obs: obs(1), TS: hlc.Timestamp{WallMS: now}, Origin: "c"},       // older report, higher stamp: wins wrongly
+		{Obs: obs(3), TS: hlc.Timestamp{WallMS: now + 1}, Origin: "c"},   // fresher and higher: a correct win
+	} {
+		if err := n.receive(tr.TS, map[crdt.ICAO]crdt.Track{"AAAAA1": tr}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := n.Counters()
+	if c.MergeApplied != 3 || c.MergeRegress != 1 {
+		t.Fatalf("merge_applied=%d merge_regress=%d, want 3 and 1", c.MergeApplied, c.MergeRegress)
 	}
 }
 

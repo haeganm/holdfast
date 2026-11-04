@@ -20,8 +20,11 @@ Definitions used throughout:
     prop               propagation latency: for each report and each edge node that did
                        not make it, time until the node holds it or something fresher
     settle_ms          after ingest stops, time until every node's hash is equal
-    recover_ms         after a partition heals, time until the worst per-poll p95 lag
-                       is back at or below its worst value before the partition
+    recover_ms         after a partition heals (timed from when the heal command starts),
+                       time until every edge node holds every aircraft at most as stale
+                       as the worst moment before the cut, and stays there until ingest
+                       stops
+    bytes_per_obs      sync message bytes during ingest / reports ingested
 Only edge nodes count toward lag; the star hub is a relay and has no coverage.
 """
 
@@ -143,6 +146,7 @@ class Run:
     polls: list[Poll] = field(default_factory=list)
     events: dict[str, int] = field(default_factory=dict)  # name -> ms since t0, VM clock
     vm_offset_ms: int = 0  # VM clock minus host clock
+    commit: str = ""  # git commit the run was measured at, with "-dirty" for uncommitted changes
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -195,6 +199,11 @@ def execute(run: Run) -> None:
                     raise RuntimeError("nodes not ready 2 s before the trace starts")
                 time.sleep(0.2)
         run.vm_offset_ms = sorted(offsets)[len(offsets) // 2]
+        # t0 is our clock but the nodes read it on the Docker VM's clock. A big
+        # gap means the schedule below fires at the wrong moments relative to
+        # ingest, so refuse rather than measure something else.
+        if abs(run.vm_offset_ms) > 2000:
+            raise RuntimeError(f"Docker VM clock is {run.vm_offset_ms} ms off the host clock; resync it (wsl --shutdown) and rerun")
 
         if LOSS.get(cfg.scenario):
             for n in run.nodes:
@@ -208,11 +217,16 @@ def execute(run: Run) -> None:
                 schedule.append(("heal", run.part_end, target, ["clear"]))
 
         def fire(name: str, node: str, args: list[str]) -> None:
+            # The change lands somewhere between docker exec starting and
+            # returning. Timing from the start makes recover_ms an upper bound.
+            started = now_ms()
             try:
                 netem(node, args)
-                run.events[name] = now_ms() + run.vm_offset_ms - t0
             except RuntimeError as e:
                 run.errors.append(str(e))
+                return
+            run.events[name] = started + run.vm_offset_ms - t0
+            run.events[name + "_exec"] = now_ms() - started
 
         threads = []
         end = run.duration_ms + run.settle_ms_window
@@ -269,11 +283,28 @@ def propagation(run: Run) -> list[float]:
     return out
 
 
+def recovery(worst_by_poll: list[tuple[int, float]], cut: int | None, heal: int | None, end: int) -> int | str:
+    """Milliseconds from the heal until every edge node holds every aircraft
+    at most as stale as the worst moment before the cut, and stays there until
+    ingest stops. Empty if there was no heal, or it never got there."""
+    if cut is None or heal is None:
+        return ""
+    before = [v for t, v in worst_by_poll if WARMUP_MS <= t < cut]
+    if not before:
+        return ""
+    floor = max(before)
+    after = [(t, v) for t, v in worst_by_poll if heal <= t <= end]
+    for i, (t, _) in enumerate(after):
+        if all(v <= floor for _, v in after[i:]):
+            return t - heal
+    return ""
+
+
 def analyze(run: Run, polls_path: Path) -> dict:
     first_seen: dict[str, int] = {}
     samples: list[float] = []
     behind_fracs: list[float] = []
-    p95_by_poll: list[tuple[int, float]] = []
+    worst_by_poll: list[tuple[int, float]] = []  # the worst edge node's worst aircraft
     settled_at = None
     polls_path.parent.mkdir(parents=True, exist_ok=True)
     with polls_path.open("w", newline="") as f:
@@ -289,6 +320,7 @@ def analyze(run: Run, polls_path: Path) -> dict:
                         first_seen[ac] = min(first_seen.get(ac, own), own)
             poll_lags: list[float] = []
             behind = 0
+            worst = 0.0
             for n in run.nodes:
                 tracks = p.states[n]["tracks"]
                 lags = []
@@ -299,13 +331,14 @@ def analyze(run: Run, polls_path: Path) -> dict:
                     lags.sort()
                     poll_lags.extend(lags)
                     behind += sum(1 for x in lags if x > BEHIND_MS)
+                    worst = max([worst, *lags[-1:]])
                 w.writerow([p.t, n, len(tracks), p.states[n]["hash"][:12], len(truth),
                             pct(lags, 50) if lags else "", pct(lags, 95) if lags else "",
                             lags[-1] if lags else "", sum(1 for x in lags if x > BEHIND_MS) if lags else ""])
             in_window = WARMUP_MS <= p.t <= run.duration_ms
             if poll_lags:
                 poll_lags.sort()
-                p95_by_poll.append((p.t, pct(poll_lags, 95)))
+                worst_by_poll.append((p.t, worst))
                 if in_window:
                     samples.extend(poll_lags)
                     behind_fracs.append(behind / len(poll_lags))
@@ -333,12 +366,17 @@ def analyze(run: Run, polls_path: Path) -> dict:
     ref = final.get("a", {}).get("tracks", {})
     wrong_final = sum(1 for ac, fresh in truth_end.items() if ac not in ref or ref[ac]["at"] < fresh)
 
-    recover = ""
-    heal_t = run.events.get("heal")
-    if heal_t is not None:
-        floor = max((v for t, v in p95_by_poll if WARMUP_MS <= t < run.events.get("cut", run.part_start)), default=None)
-        after = [t for t, v in p95_by_poll if t >= heal_t and floor is not None and v <= floor]
-        recover = after[0] - heal_t if after else ""
+    recover = recovery(worst_by_poll, run.events.get("cut"), run.events.get("heal"), run.duration_ms)
+
+    # Bytes per observation over the ingest window only, so the idle digests
+    # exchanged while settling don't inflate it with the run length.
+    window = [p for p in run.polls if 0 <= p.t <= run.duration_ms]
+    win_bytes = win_ingest = 0
+    if len(window) >= 2:
+        for n in run.nodes:
+            a, b = window[0].states[n]["counters"], window[-1].states[n]["counters"]
+            win_bytes += sum(b.get(k, 0) - a.get(k, 0) for k in ("bytes_out", "bytes_in"))
+            win_ingest += b.get("ingest_total", 0) - a.get("ingest_total", 0)
 
     gaps = [b.t - a.t for a, b in zip(run.polls, run.polls[1:])]
     ingest = totals.get("ingest_total", 0)
@@ -351,6 +389,7 @@ def analyze(run: Run, polls_path: Path) -> dict:
         "settle_ms": "" if settled_at is None else settled_at - run.duration_ms,
         "recover_ms": recover,
         "cut_at_ms": run.events.get("cut", ""), "heal_at_ms": run.events.get("heal", ""),
+        "heal_exec_ms": run.events.get("heal_exec", ""),
         "prop_p50": pct(prop, 50), "prop_p95": pct(prop, 95), "prop_p99": pct(prop, 99), "prop_n": len(prop),
         "lag_p95": pct(samples, 95),
         "behind_frac": round(sum(behind_fracs) / len(behind_fracs), 4) if behind_fracs else "",
@@ -362,9 +401,9 @@ def analyze(run: Run, polls_path: Path) -> dict:
         "sync_err_rate": round(totals.get("sync_err", 0) / sync_total, 4) if sync_total else "",
         "rejected": totals.get("rejected", 0),
         "bytes_total": totals.get("bytes_out", 0) + totals.get("bytes_in", 0),
-        "bytes_per_obs": round((totals.get("bytes_out", 0) + totals.get("bytes_in", 0)) / ingest, 1) if ingest else "",
+        "bytes_per_obs": round(win_bytes / win_ingest, 1) if win_ingest else "",
         "polls": len(run.polls), "poll_ms_mean": round(sum(gaps) / len(gaps), 1) if gaps else "",
-        "vm_offset_ms": run.vm_offset_ms, "errors": " | ".join(run.errors),
+        "vm_offset_ms": run.vm_offset_ms, "commit": run.commit, "errors": " | ".join(run.errors),
     }
 
 
@@ -396,6 +435,9 @@ def main() -> int:
         print(f"building {IMAGE}", flush=True)
         sh("docker", "build", "-q", "-t", IMAGE, "-f", str(ROOT / "harness" / "Dockerfile"), str(ROOT))
 
+    commit = sh("git", "-C", str(ROOT), "rev-parse", "--short", "HEAD").strip()
+    if sh("git", "-C", str(ROOT), "status", "--porcelain").strip():
+        commit += "-dirty"
     summary_path = out / "summary.csv"
     failures = []
     total = len(configs) * repeats
@@ -405,7 +447,7 @@ def main() -> int:
         for repeat in range(repeats):
             for cfg in configs:
                 i += 1
-                run = Run(cfg, repeat, duration_ms, args.settle * 1000, heal=not args.no_heal)
+                run = Run(cfg, repeat, duration_ms, args.settle * 1000, heal=not args.no_heal, commit=commit)
                 started = time.time()
                 try:
                     execute(run)

@@ -80,5 +80,44 @@ class AnalyzeTest(unittest.TestCase):
         self.assertEqual(self.analyze()["wrong_final"], 1)  # a still holds the 5000 report
 
 
+class RecoveryTest(unittest.TestCase):
+    # (t, worst lag of any edge node on any aircraft)
+    BEFORE = [(3000, 1000), (4000, 2000)]  # worst before the cut: 2000
+
+    def test_must_stay_at_or_below_the_pre_cut_worst(self):
+        after = [(8000, 9000), (8200, 2000), (8400, 3000), (8600, 2000), (10_000, 1000)]
+        # 8200 dips to the floor but 8400 goes back above it; 8600 is the first that holds.
+        self.assertEqual(h.recovery(self.BEFORE + after, cut=5000, heal=8000, end=10_000), 600)
+
+    def test_never_recovers(self):
+        after = [(8000, 9000), (10_000, 2500)]
+        self.assertEqual(h.recovery(self.BEFORE + after, cut=5000, heal=8000, end=10_000), "")
+
+    def test_needs_a_cut_and_a_heal(self):
+        self.assertEqual(h.recovery(self.BEFORE, cut=5000, heal=None, end=10_000), "")
+        self.assertEqual(h.recovery(self.BEFORE, cut=None, heal=8000, end=10_000), "")
+
+
+class LagTest(unittest.TestCase):
+    def test_lag_and_behind(self):
+        r1, r2 = T0 + 4000, T0 + 8000
+        cfg = h.Config("test", "mesh", "loss0", "hlc", 0)
+        exp = h.Run(cfg, 0, duration_ms=10_000, settle_ms_window=0)
+        held = lambda r: {"AAAAAA": {"ts": {}, "origin": "a", "at": r}}  # noqa: E731
+        mine = lambda r: {"AAAAAA": {"ts": {}, "origin": "a", "at": r, "own": r}}  # noqa: E731
+        exp.polls = [
+            poll(4000, a=state(4000, mine(r1)), b=state(4000, held(r1)), c=state(4000, held(r1))),
+            # a has made a newer report; b is 4 s behind it, c has caught up
+            poll(8000, a=state(8000, mine(r2)), b=state(8000, held(r1)), c=state(8000, held(r2))),
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            row = h.analyze(exp, Path(d) / "polls.csv")
+            with (Path(d) / "polls.csv").open() as f:
+                b_last = [line for line in f if line.startswith("8000,b,")][0].strip().split(",")
+        self.assertEqual(row["lag_p95"], 4000)  # six samples, one of them 4000
+        self.assertAlmostEqual(row["behind_frac"], round((0 / 3 + 1 / 3) / 2, 4))
+        self.assertEqual(b_last[-2:], ["4000", "1"])  # b's worst lag, and one aircraft over 2 s behind
+
+
 if __name__ == "__main__":
     unittest.main()

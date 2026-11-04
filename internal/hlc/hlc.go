@@ -12,8 +12,11 @@
 // its next write after anything it has already received, so its fresh data is
 // not silently overwritten by older data from a node whose clock runs fast.
 //
-// The logical counter is bounded by the number of events inside one
-// millisecond of clock skew, so uint32 cannot overflow in this system.
+// The logical counter only grows while the physical clock trails the latest
+// timestamp seen, so it stays small as long as remote timestamps are
+// bounded. The clock trusts its inputs: a remote timestamp with a logical
+// part near MaxUint32 would wrap it. Callers must bound what they pass to
+// Update; the node rejects stamps too far ahead or with a huge logical part.
 package hlc
 
 import (
