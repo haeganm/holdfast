@@ -7,12 +7,18 @@
 #   netem loss gemodel 20% 50%
 #   netem loss 100%        (partition)
 #   netem clear
+#   netem txbytes          (bytes sent on the mesh link so far, headers and retransmits included)
 set -eu
 
 dev=$(ip -o -4 addr show | awk '$4 ~ /^172\.30\.0\./ { print $2; exit }')
 if [ -z "$dev" ]; then
   echo "netem: no interface on the mesh network 172.30.0.0/24 in this container" >&2
   exit 1
+fi
+
+if [ "${1:-}" = "txbytes" ]; then
+  cat "/sys/class/net/$dev/statistics/tx_bytes"
+  exit 0
 fi
 
 if [ "${1:-}" = "clear" ]; then

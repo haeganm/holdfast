@@ -80,22 +80,41 @@ class AnalyzeTest(unittest.TestCase):
         self.assertEqual(self.analyze()["wrong_final"], 1)  # a still holds the 5000 report
 
 
-class RecoveryTest(unittest.TestCase):
-    # (t, worst lag of any edge node on any aircraft)
-    BEFORE = [(3000, 1000), (4000, 2000)]  # worst before the cut: 2000
+class RecoveryAllTest(unittest.TestCase):
+    # (t, worst lag of any edge node on any aircraft); worst before the cut: 2000
+    BEFORE = [(3000, 1000), (4000, 2000)]
 
-    def test_must_stay_at_or_below_the_pre_cut_worst(self):
-        after = [(8000, 9000), (8200, 2000), (8400, 3000), (8600, 2000), (10_000, 1000)]
-        # 8200 dips to the floor but 8400 goes back above it; 8600 is the first that holds.
-        self.assertEqual(h.recovery(self.BEFORE + after, cut=5000, heal=8000, end=10_000), 600)
+    def test_must_hold_at_or_below_the_pre_cut_worst_for_the_sustain_window(self):
+        after = [(8000, 9000), (8200, 2000), (8400, 3000), (8600, 2000), (9000, 1000), (10_600, 2000)]
+        # 8200 dips to the floor but 8400 goes back above it; from 8600 it holds 2 s.
+        self.assertEqual(h.recovery_all(self.BEFORE + after, cut=5000, heal=8000, end=12_000), 600)
+
+    def test_holding_until_ingest_stops_counts(self):
+        after = [(8000, 9000), (9500, 1000)]
+        self.assertEqual(h.recovery_all(self.BEFORE + after, cut=5000, heal=8000, end=10_000), 1500)
 
     def test_never_recovers(self):
         after = [(8000, 9000), (10_000, 2500)]
-        self.assertEqual(h.recovery(self.BEFORE + after, cut=5000, heal=8000, end=10_000), "")
+        self.assertEqual(h.recovery_all(self.BEFORE + after, cut=5000, heal=8000, end=10_000), "")
 
     def test_needs_a_cut_and_a_heal(self):
-        self.assertEqual(h.recovery(self.BEFORE, cut=5000, heal=None, end=10_000), "")
-        self.assertEqual(h.recovery(self.BEFORE, cut=None, heal=8000, end=10_000), "")
+        self.assertEqual(h.recovery_all(self.BEFORE, cut=5000, heal=None, end=10_000), "")
+        self.assertEqual(h.recovery_all(self.BEFORE, cut=None, heal=8000, end=10_000), "")
+
+
+class RecoveryP95Test(unittest.TestCase):
+    BEFORE = [(3000, 1000), (4000, 2000)]
+
+    def test_first_poll_back_at_the_pre_cut_worst(self):
+        after = [(8000, 5000), (8300, 2000), (8500, 9000)]
+        self.assertEqual(h.recovery_p95(self.BEFORE + after, cut=5000, heal=8000), 300)
+
+    def test_never(self):
+        self.assertEqual(h.recovery_p95(self.BEFORE + [(8000, 5000)], cut=5000, heal=8000), "")
+
+    def test_short_runs_still_get_a_pre_cut_window(self):
+        # A cut before the warm-up ends uses the half of the time before the cut.
+        self.assertEqual(h.recovery_p95([(1500, 1000), (8000, 900)], cut=2800, heal=8000), 0)
 
 
 class LagTest(unittest.TestCase):
@@ -117,6 +136,24 @@ class LagTest(unittest.TestCase):
         self.assertEqual(row["lag_p95"], 4000)  # six samples, one of them 4000
         self.assertAlmostEqual(row["behind_frac"], round((0 / 3 + 1 / 3) / 2, 4))
         self.assertEqual(b_last[-2:], ["4000", "1"])  # b's worst lag, and one aircraft over 2 s behind
+
+
+class RawRoundTripTest(unittest.TestCase):
+    def test_reloaded_raw_gives_the_same_summary(self):
+        r = T0 + 5000
+        mine = {"AAAAAA": {"ts": {"w": 1, "l": 0}, "origin": "a", "at": r, "own": r}}
+        cfg = h.Config("test", "mesh", "partition", "hlc", 0)
+        exp = h.Run(cfg, 2, duration_ms=10_000, settle_ms_window=5000, commit="abc1234")
+        exp.polls = [poll(t, a=state(t, mine, "1"), b=state(t, mine, "1"), c=state(t, mine, "1"))
+                     for t in (0, 4000, 9000, 10_400)]
+        exp.events = {"cut": 4000, "heal": 8000}
+        exp.tx = {"start": {"a": 10, "b": 10, "c": 10}, "end": {"a": 110, "b": 210, "c": 310}}
+        with tempfile.TemporaryDirectory() as d:
+            raw = Path(d) / "raw" / "x.json.gz"
+            h.save_raw(exp, raw)
+            again = h.load_raw(raw)
+            self.assertEqual(h.analyze(exp, Path(d) / "p1.csv"), h.analyze(again, Path(d) / "p2.csv"))
+            self.assertEqual(again.cfg, cfg)
 
 
 if __name__ == "__main__":

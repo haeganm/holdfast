@@ -3,28 +3,40 @@
     python harness/run.py --smoke                 # two short runs; exits 1 unless both converge
     python harness/run.py --family sync --repeats 5
     python harness/run.py --family clock --repeats 5
+    python harness/run.py --reanalyze results/<dir>   # recompute summary.csv from raw/
 
 Each run starts fresh containers, replays the same trace on every edge node,
 impairs the mesh link with tc netem on a schedule, and polls every node's
 /state about every 100 ms on a control network netem never touches.
 
 Outputs, under --out (default results/<utc stamp>-<family>):
-    summary.csv        one row per run
-    polls/<run>.csv    per poll, per node: picture size, hash, lag percentiles
+    raw/<run>.json.gz  every poll as received, plus the run's events: the source
+                       of truth, so a metric can be redefined and recomputed
+                       without rerunning anything
+    summary.csv        one row per run, computed from raw/
+    polls/<run>.csv    per poll, per node: picture size, hash, lag
 
 Definitions used throughout:
     truth(aircraft)    the freshest report of it that any edge node has made itself
     lag(node, ac)      truth(ac) minus the observation time of what the node holds
                        for it; if the node holds nothing, minus the first time any
-                       node reported it
+                       node reported it. Reports land on a 1 s grid per aircraft,
+                       so lag moves in whole seconds.
     prop               propagation latency: for each report and each edge node that did
                        not make it, time until the node holds it or something fresher
     settle_ms          after ingest stops, time until every node's hash is equal
-    recover_ms         after a partition heals (timed from when the heal command starts),
-                       time until every edge node holds every aircraft at most as stale
-                       as the worst moment before the cut, and stays there until ingest
-                       stops
-    bytes_per_obs      sync message bytes during ingest / reports ingested
+    recover_p95_ms     prediction 5 as registered: after a partition heals, time until
+                       the p95 lag over all edge nodes and aircraft is back at or below
+                       its worst value before the cut
+    recover_all_ms     stricter, added after the predictions were registered: time until
+                       every edge node holds every aircraft at most as stale as the worst
+                       moment before the cut, and stays there for 2 s (or until ingest
+                       stops)
+                       Both are timed from when the heal command starts, so both are
+                       upper bounds.
+    wire_bytes_per_obs bytes sent on every node's mesh link during ingest (headers and
+                       retransmits included, read from the interface counters) divided
+                       by reports ingested
 Only edge nodes count toward lag; the star hub is a relay and has no coverage.
 """
 
@@ -33,6 +45,7 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+import gzip
 import json
 import math
 import os
@@ -42,12 +55,13 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 COMPOSE = ROOT / "harness" / "compose.yml"
 IMAGE = "holdfast:dev"
+COMMIT_LABEL = "holdfast.commit"
 
 IP = {"hub": "172.30.0.10", "a": "172.30.0.11", "b": "172.30.0.12", "c": "172.30.0.13"}
 PORT = {"a": 8081, "b": 8082, "c": 8083, "hub": 8084}
@@ -56,6 +70,7 @@ EDGES = ("a", "b", "c")
 POLL_MS = 100
 BEHIND_MS = 2000  # two sync intervals
 WARMUP_MS = 3000  # ignore the first seconds while every node is still filling up
+SUSTAIN_MS = 2000  # how long recover_all_ms must hold
 
 # Static impairments applied to every node for the whole run.
 LOSS = {
@@ -110,11 +125,14 @@ def compose(env: dict, *args: str) -> None:
     sh("docker", "compose", "-f", str(COMPOSE), "--profile", "star", *args, env=env)
 
 
-def netem(node: str, args: list[str]) -> None:
+def netem(node: str, args: list[str]) -> str:
     out = sh("docker", "exec", "-u", "0", f"hf-{node}", "netem", *args)
+    if args == ["txbytes"]:
+        return out.strip()
     active = "netem" in out  # netem.sh prints the qdisc it left in place
     if active == (args == ["clear"]):
         raise RuntimeError(f"netem {args} on {node} did not take effect: {out.strip()}")
+    return out
 
 
 def get_state(node: str) -> dict:
@@ -128,6 +146,11 @@ def pct(sorted_vals: list[float], q: float) -> float:
         return float("nan")
     k = max(0, math.ceil(q / 100 * len(sorted_vals)) - 1)
     return sorted_vals[k]
+
+
+def blank_pct(sorted_vals: list[float], q: float) -> float | str:
+    """pct, but blank rather than NaN for a summary cell with no samples."""
+    return pct(sorted_vals, q) if sorted_vals else ""
 
 
 @dataclass
@@ -145,8 +168,9 @@ class Run:
     heal: bool = True
     polls: list[Poll] = field(default_factory=list)
     events: dict[str, int] = field(default_factory=dict)  # name -> ms since t0, VM clock
+    tx: dict[str, dict[str, int]] = field(default_factory=dict)  # "start"/"end" -> node -> mesh tx bytes
     vm_offset_ms: int = 0  # VM clock minus host clock
-    commit: str = ""  # git commit the run was measured at, with "-dirty" for uncommitted changes
+    commit: str = ""  # commit the node image was built from
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -160,6 +184,22 @@ class Run:
     @property
     def part_end(self) -> int:
         return int(self.duration_ms * 0.8)
+
+
+def save_raw(run: Run, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc = asdict(run)
+    doc["polls"] = [[p.t, p.states] for p in run.polls]
+    with gzip.open(path, "wt", encoding="utf-8") as f:
+        json.dump(doc, f, separators=(",", ":"))
+
+
+def load_raw(path: Path) -> Run:
+    with gzip.open(path, "rt", encoding="utf-8") as f:
+        doc = json.load(f)
+    doc["cfg"] = Config(**doc["cfg"])
+    doc["polls"] = [Poll(t, states) for t, states in doc["polls"]]
+    return Run(**doc)
 
 
 def peers(node: str, topology: str) -> str:
@@ -210,20 +250,27 @@ def execute(run: Run) -> None:
                 netem(n, LOSS[cfg.scenario])
 
         target = "hub" if cfg.scenario == "hubdown" else "c"
-        schedule = []
+        schedule: list[tuple[str, int, str | None, list[str]]] = [
+            ("tx:start", 0, None, ["txbytes"]),
+            ("tx:end", run.duration_ms, None, ["txbytes"]),
+        ]
         if cfg.scenario in ("partition", "hubdown"):
             schedule.append(("cut", run.part_start, target, ["loss", "100%"]))
             if run.heal:
                 schedule.append(("heal", run.part_end, target, ["clear"]))
+        schedule.sort(key=lambda e: e[1])
 
-        def fire(name: str, node: str, args: list[str]) -> None:
-            # The change lands somewhere between docker exec starting and
-            # returning. Timing from the start makes recover_ms an upper bound.
+        def fire(name: str, node: str | None, args: list[str]) -> None:
+            # A change lands somewhere between docker exec starting and
+            # returning. Timing from the start makes recovery an upper bound.
             started = now_ms()
             try:
-                netem(node, args)
-            except RuntimeError as e:
-                run.errors.append(str(e))
+                if name.startswith("tx:"):
+                    run.tx[name[3:]] = {n: int(netem(n, args)) for n in run.nodes}
+                else:
+                    netem(node or "", args)
+            except (RuntimeError, ValueError) as e:
+                run.errors.append(f"{name}: {e}")
                 return
             run.events[name] = started + run.vm_offset_ms - t0
             run.events[name + "_exec"] = now_ms() - started
@@ -283,27 +330,57 @@ def propagation(run: Run) -> list[float]:
     return out
 
 
-def recovery(worst_by_poll: list[tuple[int, float]], cut: int | None, heal: int | None, end: int) -> int | str:
-    """Milliseconds from the heal until every edge node holds every aircraft
-    at most as stale as the worst moment before the cut, and stays there until
-    ingest stops. Empty if there was no heal, or it never got there."""
+def before_cut(series: list[tuple[int, float]], cut: int) -> list[float]:
+    """Values from the warm-up (or half the time to the cut, if that's
+    shorter) until the cut."""
+    lo = min(WARMUP_MS, cut // 2)
+    return [v for t, v in series if lo <= t < cut]
+
+
+def recovery_p95(p95_by_poll: list[tuple[int, float]], cut: int | None, heal: int | None) -> int | str:
+    """Prediction 5 as registered: ms from the heal until the pooled p95 lag
+    is at or below its worst value before the cut. Empty if it never is."""
     if cut is None or heal is None:
         return ""
-    before = [v for t, v in worst_by_poll if WARMUP_MS <= t < cut]
+    before = before_cut(p95_by_poll, cut)
     if not before:
         return ""
-    floor = max(before)
-    after = [(t, v) for t, v in worst_by_poll if heal <= t <= end]
-    for i, (t, _) in enumerate(after):
-        if all(v <= floor for _, v in after[i:]):
+    p95_floor = max(before)
+    for t, v in p95_by_poll:
+        if t >= heal and v <= p95_floor:
             return t - heal
     return ""
+
+
+def recovery_all(worst_by_poll: list[tuple[int, float]], cut: int | None, heal: int | None, end: int) -> int | str:
+    """Stricter: ms from the heal until every edge node holds every aircraft
+    at most as stale as the worst moment before the cut, and keeps that for
+    SUSTAIN_MS or until ingest stops. Empty if it never does."""
+    if cut is None or heal is None:
+        return ""
+    before = before_cut(worst_by_poll, cut)
+    if not before:
+        return ""
+    worst_floor = max(before)
+    start = None
+    for t, v in worst_by_poll:
+        if not heal <= t <= end:
+            continue
+        if v > worst_floor:
+            start = None
+            continue
+        if start is None:
+            start = t
+        if t - start >= SUSTAIN_MS:
+            return start - heal
+    return "" if start is None else start - heal  # held until ingest stopped
 
 
 def analyze(run: Run, polls_path: Path) -> dict:
     first_seen: dict[str, int] = {}
     samples: list[float] = []
     behind_fracs: list[float] = []
+    p95_by_poll: list[tuple[int, float]] = []  # pooled over edge nodes and aircraft
     worst_by_poll: list[tuple[int, float]] = []  # the worst edge node's worst aircraft
     settled_at = None
     polls_path.parent.mkdir(parents=True, exist_ok=True)
@@ -331,15 +408,16 @@ def analyze(run: Run, polls_path: Path) -> dict:
                     lags.sort()
                     poll_lags.extend(lags)
                     behind += sum(1 for x in lags if x > BEHIND_MS)
-                    worst = max([worst, *lags[-1:]])
+                    if lags:
+                        worst = max(worst, lags[-1])
                 w.writerow([p.t, n, len(tracks), p.states[n]["hash"][:12], len(truth),
                             pct(lags, 50) if lags else "", pct(lags, 95) if lags else "",
                             lags[-1] if lags else "", sum(1 for x in lags if x > BEHIND_MS) if lags else ""])
-            in_window = WARMUP_MS <= p.t <= run.duration_ms
             if poll_lags:
                 poll_lags.sort()
+                p95_by_poll.append((p.t, pct(poll_lags, 95)))
                 worst_by_poll.append((p.t, worst))
-                if in_window:
+                if WARMUP_MS <= p.t <= run.duration_ms:
                     samples.extend(poll_lags)
                     behind_fracs.append(behind / len(poll_lags))
             if settled_at is None and p.t >= run.duration_ms and len({p.states[n]["hash"] for n in run.nodes}) == 1:
@@ -366,20 +444,13 @@ def analyze(run: Run, polls_path: Path) -> dict:
     ref = final.get("a", {}).get("tracks", {})
     wrong_final = sum(1 for ac, fresh in truth_end.items() if ac not in ref or ref[ac]["at"] < fresh)
 
-    recover = recovery(worst_by_poll, run.events.get("cut"), run.events.get("heal"), run.duration_ms)
-
-    # Bytes per observation over the ingest window only, so the idle digests
-    # exchanged while settling don't inflate it with the run length.
-    window = [p for p in run.polls if 0 <= p.t <= run.duration_ms]
-    win_bytes = win_ingest = 0
-    if len(window) >= 2:
-        for n in run.nodes:
-            a, b = window[0].states[n]["counters"], window[-1].states[n]["counters"]
-            win_bytes += sum(b.get(k, 0) - a.get(k, 0) for k in ("bytes_out", "bytes_in"))
-            win_ingest += b.get("ingest_total", 0) - a.get("ingest_total", 0)
+    cut, heal = run.events.get("cut"), run.events.get("heal")
+    ingest = totals.get("ingest_total", 0)
+    wire = ""
+    if "start" in run.tx and "end" in run.tx and ingest:
+        wire = round(sum(run.tx["end"][n] - run.tx["start"][n] for n in run.nodes) / ingest, 1)
 
     gaps = [b.t - a.t for a, b in zip(run.polls, run.polls[1:])]
-    ingest = totals.get("ingest_total", 0)
     sync_total = totals.get("sync_ok", 0) + totals.get("sync_err", 0)
     c = run.cfg
     return {
@@ -387,11 +458,12 @@ def analyze(run: Run, polls_path: Path) -> dict:
         "clock": c.clock, "skew_ms": c.skew_ms, "repeat": run.repeat, "duration_ms": run.duration_ms,
         "settled": settled_at is not None,
         "settle_ms": "" if settled_at is None else settled_at - run.duration_ms,
-        "recover_ms": recover,
-        "cut_at_ms": run.events.get("cut", ""), "heal_at_ms": run.events.get("heal", ""),
+        "recover_p95_ms": recovery_p95(p95_by_poll, cut, heal),
+        "recover_all_ms": recovery_all(worst_by_poll, cut, heal, run.duration_ms),
+        "cut_at_ms": "" if cut is None else cut, "heal_at_ms": "" if heal is None else heal,
         "heal_exec_ms": run.events.get("heal_exec", ""),
-        "prop_p50": pct(prop, 50), "prop_p95": pct(prop, 95), "prop_p99": pct(prop, 99), "prop_n": len(prop),
-        "lag_p95": pct(samples, 95),
+        "prop_p50": blank_pct(prop, 50), "prop_p95": blank_pct(prop, 95), "prop_p99": blank_pct(prop, 99),
+        "prop_n": len(prop), "lag_p95": blank_pct(samples, 95),
         "behind_frac": round(sum(behind_fracs) / len(behind_fracs), 4) if behind_fracs else "",
         "aircraft": len(own_by), "overlap_frac": round(sum(1 for v in own_by.values() if v >= 2) / len(own_by), 3) if own_by else "",
         "ingest_total": ingest, "ingest_lost": totals.get("ingest_lost", 0),
@@ -400,11 +472,66 @@ def analyze(run: Run, polls_path: Path) -> dict:
         "sync_ok": totals.get("sync_ok", 0), "sync_err": totals.get("sync_err", 0),
         "sync_err_rate": round(totals.get("sync_err", 0) / sync_total, 4) if sync_total else "",
         "rejected": totals.get("rejected", 0),
-        "bytes_total": totals.get("bytes_out", 0) + totals.get("bytes_in", 0),
-        "bytes_per_obs": round(win_bytes / win_ingest, 1) if win_ingest else "",
+        "wire_bytes_per_obs": wire,
         "polls": len(run.polls), "poll_ms_mean": round(sum(gaps) / len(gaps), 1) if gaps else "",
         "vm_offset_ms": run.vm_offset_ms, "commit": run.commit, "errors": " | ".join(run.errors),
     }
+
+
+def git_commit() -> str:
+    try:
+        commit = sh("git", "-C", str(ROOT), "rev-parse", "--short", "HEAD").strip()
+        if sh("git", "-C", str(ROOT), "status", "--porcelain").strip():
+            commit += "-dirty"
+        return commit
+    except (RuntimeError, OSError):
+        return "unknown"
+
+
+def image_commit() -> str:
+    return sh("docker", "image", "inspect", IMAGE, "--format",
+              "{{index .Config.Labels \"" + COMMIT_LABEL + "\"}}").strip()
+
+
+class Summary:
+    """summary.csv, written a row at a time so a crash keeps what finished."""
+
+    def __init__(self, path: Path):
+        self.f = path.open("w", newline="")
+        self.w: csv.DictWriter | None = None
+
+    def add(self, row: dict) -> None:
+        if self.w is None:
+            self.w = csv.DictWriter(self.f, fieldnames=list(row), lineterminator="\n")
+            self.w.writeheader()
+        self.w.writerow(row)
+        self.f.flush()
+
+    def close(self) -> None:
+        self.f.close()
+
+
+def failures_of(row: dict, scenario: str, healed: bool) -> list[str]:
+    out = []
+    if not row["settled"] or row["errors"] or row["rejected"]:
+        out.append(row["run_id"])
+    if scenario in ("partition", "hubdown") and healed and row["recover_p95_ms"] == "":
+        out.append(row["run_id"] + " (never recovered)")
+    return out
+
+
+def reanalyze(out: Path) -> int:
+    raws = sorted((out / "raw").glob("*.json.gz"))
+    if not raws:
+        print(f"no raw runs under {out / 'raw'}")
+        return 1
+    summary = Summary(out / "summary.csv")
+    for path in raws:
+        run = load_raw(path)
+        summary.add(analyze(run, out / "polls" / f"{run.cfg.run_id(run.repeat)}.csv"))
+    summary.close()
+    print(f"recomputed {len(raws)} runs into {out / 'summary.csv'}")
+    return 0
 
 
 def main() -> int:
@@ -413,16 +540,19 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--smoke", action="store_true", help="two short runs; exit 1 unless both converge")
     ap.add_argument("--family", choices=("sync", "clock", "all"))
+    ap.add_argument("--reanalyze", type=Path, metavar="DIR", help="recompute DIR/summary.csv from DIR/raw")
     ap.add_argument("--repeats", type=int, default=5)
     ap.add_argument("--duration", type=int, help="seconds of ingest (default 50, smoke 20)")
     ap.add_argument("--settle", type=int, default=10, help="seconds to keep polling after ingest stops")
     ap.add_argument("--out", type=Path)
     ap.add_argument("--no-heal", action="store_true",
                     help="never heal partitions; exists to prove the smoke gate fails when nodes stay apart")
-    ap.add_argument("--skip-build", action="store_true")
+    ap.add_argument("--skip-build", action="store_true", help="reuse holdfast:dev if it was built from this commit")
     args = ap.parse_args()
-    if args.smoke == bool(args.family):
-        ap.error("give exactly one of --smoke or --family")
+    if sum([args.smoke, bool(args.family), bool(args.reanalyze)]) != 1:
+        ap.error("give exactly one of --smoke, --family or --reanalyze")
+    if args.reanalyze:
+        return reanalyze(args.reanalyze)
 
     configs = SMOKE if args.smoke else experiments(args.family)
     repeats = 1 if args.smoke else args.repeats
@@ -431,46 +561,45 @@ def main() -> int:
     out = args.out or ROOT / "results" / f"{stamp}-{'smoke' if args.smoke else args.family}"
     out.mkdir(parents=True, exist_ok=True)
 
-    if not args.skip_build:
-        print(f"building {IMAGE}", flush=True)
-        sh("docker", "build", "-q", "-t", IMAGE, "-f", str(ROOT / "harness" / "Dockerfile"), str(ROOT))
+    # Results are credited to the commit the node image was built from, and a
+    # reused image must match the checkout, or the label would be a lie.
+    commit = git_commit()
+    if args.skip_build:
+        built = image_commit()
+        if built != commit:
+            print(f"{IMAGE} was built from {built or 'an unlabeled tree'}, the checkout is {commit}; drop --skip-build")
+            return 1
+    else:
+        print(f"building {IMAGE} at {commit}", flush=True)
+        sh("docker", "build", "-q", "-t", IMAGE, "--label", f"{COMMIT_LABEL}={commit}",
+           "-f", str(ROOT / "harness" / "Dockerfile"), str(ROOT))
 
-    commit = sh("git", "-C", str(ROOT), "rev-parse", "--short", "HEAD").strip()
-    if sh("git", "-C", str(ROOT), "status", "--porcelain").strip():
-        commit += "-dirty"
-    summary_path = out / "summary.csv"
+    summary = Summary(out / "summary.csv")
     failures = []
     total = len(configs) * repeats
     i = 0
-    writer = None
-    with summary_path.open("w", newline="") as f:
-        for repeat in range(repeats):
-            for cfg in configs:
-                i += 1
-                run = Run(cfg, repeat, duration_ms, args.settle * 1000, heal=not args.no_heal, commit=commit)
-                started = time.time()
-                try:
-                    execute(run)
-                except RuntimeError as e:
-                    run.errors.append(str(e))
-                row = analyze(run, out / "polls" / f"{cfg.run_id(repeat)}.csv")
-                if writer is None:
-                    writer = csv.DictWriter(f, fieldnames=list(row), lineterminator="\n")
-                    writer.writeheader()
-                writer.writerow(row)
-                f.flush()
-                print(f"[{i}/{total}] {row['run_id']}: settled={row['settled']} settle_ms={row['settle_ms']} "
-                      f"recover_ms={row['recover_ms']} prop_p50/p95={row['prop_p50']}/{row['prop_p95']} "
-                      f"ingest_lost={row['ingest_lost']} "
-                      f"regress={row['merge_regress']} err_rate={row['sync_err_rate']} "
-                      f"({time.time() - started:.0f}s){' ERRORS: ' + row['errors'] if row['errors'] else ''}",
-                      flush=True)
-                if not row["settled"] or row["errors"] or row["rejected"]:
-                    failures.append(row["run_id"])
-                if cfg.scenario in ("partition", "hubdown") and not args.no_heal and row["recover_ms"] == "":
-                    failures.append(row["run_id"] + " (never recovered)")
+    for repeat in range(repeats):
+        for cfg in configs:
+            i += 1
+            run = Run(cfg, repeat, duration_ms, args.settle * 1000, heal=not args.no_heal, commit=commit)
+            started = time.time()
+            try:
+                execute(run)
+            except RuntimeError as e:
+                run.errors.append(str(e))
+            save_raw(run, out / "raw" / f"{cfg.run_id(repeat)}.json.gz")
+            row = analyze(run, out / "polls" / f"{cfg.run_id(repeat)}.csv")
+            summary.add(row)
+            print(f"[{i}/{total}] {row['run_id']}: settled={row['settled']} settle_ms={row['settle_ms']} "
+                  f"recover_p95/all={row['recover_p95_ms']}/{row['recover_all_ms']} "
+                  f"prop_p50/p95={row['prop_p50']}/{row['prop_p95']} ingest_lost={row['ingest_lost']} "
+                  f"regress={row['merge_regress']} err_rate={row['sync_err_rate']} wire_B/obs={row['wire_bytes_per_obs']} "
+                  f"({time.time() - started:.0f}s){' ERRORS: ' + row['errors'] if row['errors'] else ''}",
+                  flush=True)
+            failures += failures_of(row, cfg.scenario, not args.no_heal)
+    summary.close()
 
-    print(f"wrote {summary_path}")
+    print(f"wrote {out / 'summary.csv'}")
     if failures:
         print("FAILED: " + ", ".join(failures))
         return 1 if args.smoke else 0  # in a full sweep a failed run is data, not a crash

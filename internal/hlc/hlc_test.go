@@ -105,6 +105,34 @@ func TestSlowClockOrdersAfterWhatItHasSeen(t *testing.T) {
 	}
 }
 
+// A remote stamp at the logical bound, or a burst of local events in one
+// millisecond, must never push the clock's logical part past MaxLogical:
+// peers reject such stamps, so the node would cut itself off. The clock
+// moves to the next millisecond instead, which still sorts after everything.
+func TestLogicalPartNeverPassesTheBound(t *testing.T) {
+	f := &fakeTime{ms: 1000}
+	c := New(f.now, false)
+	remote := ts(1000, MaxLogical)
+	got := c.Update(remote)
+	if got != ts(1001, 0) || got.Compare(remote) <= 0 {
+		t.Fatalf("Update(%v) = %v, want 1001.0", remote, got)
+	}
+
+	c = New(f.now, false)
+	c.Update(ts(1000, MaxLogical-1))
+	prev := c.Peek()
+	for range 3 {
+		next := c.Now()
+		if next.Logical > MaxLogical || next.Compare(prev) <= 0 {
+			t.Fatalf("Now() = %v after %v", next, prev)
+		}
+		prev = next
+	}
+	if prev.WallMS != 1001 {
+		t.Fatalf("after passing the bound the clock is at %v, want it rolled to 1001", prev)
+	}
+}
+
 func TestWallBaselineIsPlainPhysicalTime(t *testing.T) {
 	f := &fakeTime{ms: 1000}
 	c := New(f.now, true)

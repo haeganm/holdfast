@@ -10,6 +10,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -296,9 +297,18 @@ func TestIngestStampsUnderTheLock(t *testing.T) {
 					t.Error(err)
 				}
 			}()
-			select {
-			case <-done: // only possible if Ingest is not holding the lock
-			case <-time.After(50 * time.Millisecond):
+			// Hold the stamp open until someone owns n.mu. If Ingest already
+			// holds it (correct), that is immediately true and the receive
+			// queues behind Ingest. If not, wait for the receive to take it,
+			// so it is guaranteed to merge before Ingest stores.
+			deadline := time.Now().Add(5 * time.Second)
+			for n.mu.TryLock() {
+				n.mu.Unlock()
+				if time.Now().After(deadline) {
+					t.Error("the receive never took the node lock")
+					break
+				}
+				runtime.Gosched()
 			}
 		}
 		return time.Now()
@@ -313,6 +323,25 @@ func TestIngestStampsUnderTheLock(t *testing.T) {
 	<-done
 	if got := n.Counters().IngestLost; got != 0 {
 		t.Fatalf("ingest_lost = %d: a merge landed between the stamp and the store", got)
+	}
+}
+
+// A stamp exactly at the logical bound is legal. The node that receives it
+// must not then emit stamps over the bound, or every honest peer rejects it.
+func TestStampAtTheLogicalBoundDoesNotCutTheNodeOff(t *testing.T) {
+	n, _ := newLoneNode(t)
+	peer, _ := newLoneNode(t)
+	at := hlc.Timestamp{WallMS: time.Now().UnixMilli() + 1000, Logical: hlc.MaxLogical}
+	if err := n.receive(at, map[crdt.ICAO]crdt.Track{"AAAAA1": {Obs: obs(1), TS: at, Origin: "b"}}); err != nil {
+		t.Fatal(err)
+	}
+	n.Ingest("AAAAA1", obs(2))
+	mine := n.tracks.Snapshot()["AAAAA1"]
+	if mine.Origin != "a" || n.Counters().IngestLost != 0 {
+		t.Fatalf("local write lost to the stamp at the bound: kept %+v", mine)
+	}
+	if err := peer.receive(n.clock.Now(), map[crdt.ICAO]crdt.Track{"AAAAA1": mine}); err != nil {
+		t.Fatalf("a peer rejects this node after it saw a stamp at the bound: %v", err)
 	}
 }
 

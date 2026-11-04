@@ -36,13 +36,6 @@ const (
 	// is the upgrade when the picture outgrows it.
 	maxEntries = 10_000 // aircraft per digest or track batch
 
-	// maxLogical bounds the logical part of a remote stamp. A local clock's
-	// logical counter only grows while its physical clock trails the latest
-	// stamp, and MaxDrift bounds that window, so honest stamps stay many
-	// orders of magnitude below this. Without the bound, a stamp near
-	// MaxUint32 wraps the receiving clock to zero, below the track it just
-	// stored.
-	maxLogical = 1 << 20
 )
 
 var (
@@ -85,7 +78,7 @@ type Counters struct {
 	SyncOK       int64 `json:"sync_ok"`
 	SyncErr      int64 `json:"sync_err"`
 	Rejected     int64 `json:"rejected"`  // inbound messages refused at the trust boundary
-	BytesOut     int64 `json:"bytes_out"` // request bodies this node sent as initiator
+	BytesOut     int64 `json:"bytes_out"` // request bodies this node sent as initiator, for answered requests
 	BytesIn      int64 `json:"bytes_in"`  // response bodies this node received as initiator
 }
 
@@ -227,8 +220,10 @@ func checkStamp(ts hlc.Timestamp, limit int64) error {
 	if ts.WallMS < 0 {
 		return fmt.Errorf("negative stamp %v", ts)
 	}
-	if ts.Logical > maxLogical {
-		return fmt.Errorf("stamp %v has a logical part over %d", ts, maxLogical)
+	// A logical part near MaxUint32 would wrap the receiving clock to zero,
+	// below the track it just stored. Clocks never produce one over the bound.
+	if ts.Logical > hlc.MaxLogical {
+		return fmt.Errorf("stamp %v has a logical part over %d", ts, hlc.MaxLogical)
 	}
 	return nil
 }
@@ -358,12 +353,14 @@ func (n *Node) post(ctx context.Context, url string, in, out any) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	n.c.bytesOut.Add(int64(len(body)))
 	resp, err := n.client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+	// Counted once the peer has answered, so attempts that never got through
+	// don't count. The harness measures true wire bytes separately.
+	n.c.bytesOut.Add(int64(len(body)))
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	n.c.bytesIn.Add(int64(len(data)))
 	if err != nil {

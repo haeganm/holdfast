@@ -10,6 +10,7 @@ GOLANG_IMAGE="golang:1.27.3-trixie@sha256:c65ecfe613b539ac74c62a4c3b2c27e8f8a607
 export HOLDFAST_PROPERTY_RUNS="${HOLDFAST_PROPERTY_RUNS:-2000}"
 PY="${PYTHON:-python3}"
 command -v "$PY" >/dev/null 2>&1 || PY=python
+export PY
 
 step() { printf '\n== %s\n' "$*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }

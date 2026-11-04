@@ -13,10 +13,10 @@
 // not silently overwritten by older data from a node whose clock runs fast.
 //
 // The logical counter only grows while the physical clock trails the latest
-// timestamp seen, so it stays small as long as remote timestamps are
-// bounded. The clock trusts its inputs: a remote timestamp with a logical
-// part near MaxUint32 would wrap it. Callers must bound what they pass to
-// Update; the node rejects stamps too far ahead or with a huge logical part.
+// timestamp seen. It never exceeds MaxLogical: past that the clock moves to
+// the next millisecond instead, so a node that received a stamp at the bound
+// never emits one its peers would reject. Callers must reject remote stamps
+// whose logical part is already over MaxLogical.
 package hlc
 
 import (
@@ -25,6 +25,11 @@ import (
 	"sync"
 	"time"
 )
+
+// MaxLogical is the largest logical part a Clock produces or a node accepts.
+// Honest stamps stay far below it: the counter only grows while a physical
+// clock trails the latest stamp, and the node bounds that gap to its max drift.
+const MaxLogical = 1 << 20
 
 // Timestamp is a point in hybrid logical time. The zero value sorts before
 // every timestamp a Clock produces.
@@ -73,7 +78,16 @@ func (c *Clock) Now() Timestamp {
 	} else {
 		c.last.Logical++
 	}
+	c.rollOver()
 	return c.last
+}
+
+// rollOver moves to the next millisecond rather than let the logical part
+// pass MaxLogical. The result still sorts after every earlier timestamp.
+func (c *Clock) rollOver() {
+	if c.last.Logical > MaxLogical {
+		c.last = Timestamp{WallMS: c.last.WallMS + 1}
+	}
 }
 
 // Update folds in a timestamp received from another node and returns the
@@ -96,6 +110,7 @@ func (c *Clock) Update(m Timestamp) Timestamp {
 	default: // m is ahead of both the physical clock and anything seen so far
 		c.last = Timestamp{WallMS: m.WallMS, Logical: m.Logical + 1}
 	}
+	c.rollOver()
 	return c.last
 }
 
