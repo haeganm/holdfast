@@ -26,7 +26,7 @@ for m in "${mutants[@]}"; do
   IFS='|' read -r desc file sub <<<"$m"
   rm -rf "$work/src"
   mkdir -p "$work/src"
-  (cd "$root" && tar --exclude=./results --exclude=./.git -cf - .) | (cd "$work/src" && tar -xf -)
+  (cd "$root" && tar -cf - go.mod cmd internal) | (cd "$work/src" && tar -xf -)
   before="$(sha256sum "$work/src/$file" | cut -d' ' -f1)"
   perl -0pi -e "$sub" "$work/src/$file"
   after="$(sha256sum "$work/src/$file" | cut -d' ' -f1)"

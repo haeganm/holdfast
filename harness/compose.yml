@@ -1,0 +1,58 @@
+# Three edge nodes (a, b, c) and an optional hub, driven by harness/run.py,
+# which sets the variables below per run. Peers talk on "mesh", where netem
+# applies; the harness polls on "ctl" through the published ports, which netem
+# never touches.
+name: holdfast
+
+x-node: &node
+  image: holdfast:dev
+  pull_policy: never
+  cap_add: [NET_ADMIN]
+  volumes:
+    - ../traces:/traces:ro
+  stop_grace_period: 2s
+
+services:
+  a:
+    <<: *node
+    container_name: hf-a
+    ports: ["127.0.0.1:8081:8080"]
+    networks:
+      mesh: { ipv4_address: 172.30.0.11 }
+      ctl: {}
+    command: ["-id=a", "-peers=${A_PEERS}", "-clock=${CLOCK}", "-clock-offset-ms=${A_OFFSET:-0}",
+              "-trace=/traces/seed1.jsonl", "-coverage=39.0,-77.0,60", "-t0=${T0}", "-trace-ms=${TRACE_MS}"]
+  b:
+    <<: *node
+    container_name: hf-b
+    ports: ["127.0.0.1:8082:8080"]
+    networks:
+      mesh: { ipv4_address: 172.30.0.12 }
+      ctl: {}
+    command: ["-id=b", "-peers=${B_PEERS}", "-clock=${CLOCK}", "-clock-offset-ms=${B_OFFSET:-0}",
+              "-trace=/traces/seed1.jsonl", "-coverage=39.0,-76.2,60", "-t0=${T0}", "-trace-ms=${TRACE_MS}"]
+  c:
+    <<: *node
+    container_name: hf-c
+    ports: ["127.0.0.1:8083:8080"]
+    networks:
+      mesh: { ipv4_address: 172.30.0.13 }
+      ctl: {}
+    command: ["-id=c", "-peers=${C_PEERS}", "-clock=${CLOCK}", "-clock-offset-ms=${C_OFFSET:-0}",
+              "-trace=/traces/seed1.jsonl", "-coverage=39.0,-77.8,60", "-t0=${T0}", "-trace-ms=${TRACE_MS}"]
+  hub:
+    <<: *node
+    profiles: [star]
+    container_name: hf-hub
+    ports: ["127.0.0.1:8084:8080"]
+    networks:
+      mesh: { ipv4_address: 172.30.0.10 }
+      ctl: {}
+    command: ["-id=hub", "-peers=", "-clock=${CLOCK}"]
+
+networks:
+  mesh:
+    internal: true
+    ipam:
+      config: [{ subnet: 172.30.0.0/24 }]
+  ctl: {}

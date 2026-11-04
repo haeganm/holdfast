@@ -1,0 +1,2 @@
+# Only plot.py needs this; run.py and the tests are stdlib only.
+matplotlib==3.11.2
