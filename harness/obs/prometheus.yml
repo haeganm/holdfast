@@ -1,0 +1,15 @@
+# Scrapes every node's /metrics once a second over the control network,
+# which netem never touches, so the dashboard keeps seeing a node that the
+# mesh has cut off.
+global:
+  scrape_interval: 1s
+  scrape_timeout: 900ms
+
+scrape_configs:
+  - job_name: holdfast
+    static_configs:
+      - targets: ["a:8080", "b:8080", "c:8080", "hub:8080"]
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: "([^:]+):.*"
+        target_label: node

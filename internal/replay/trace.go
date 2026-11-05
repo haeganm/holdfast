@@ -1,18 +1,23 @@
 // Package replay generates, reads and plays back aircraft traces.
 //
-// A trace is JSON Lines, one position report per line, sorted by time:
+// A trace is JSON Lines, one position report per line, sorted by time, and
+// optionally gzipped:
 //
 //	{"t_ms":1000,"icao":"A1B2C3","lat":39.1,"lon":-77.2,"alt":31000,"gs":420,"hdg":87}
 //
-// The experiments use synthetic traces from Generate rather than recorded
-// ADS-B data: the ground truth has to be exact (which node saw what, when) to
-// measure staleness, and recorded data has gaps and jitter that make "the
-// freshest report" ambiguous. A recorded feed converts to the same format.
+// Two kinds exist. Synthetic traces from Generate give exact ground truth:
+// every node in range receives every report at t_ms, the moment it was
+// made. Recorded traces (cmd/gentrace -sensor) hold what each node actually
+// received from a live feed, so a line also names its node and how long the
+// feed took to deliver it:
+//
+//	{"t_ms":1000,"icao":"A1B2C3",...,"node":"a","delay_ms":420}
 package replay
 
 import (
 	"bufio"
 	"cmp"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -20,6 +25,7 @@ import (
 	"io"
 	"math"
 	"math/rand/v2"
+	"os"
 	"regexp"
 	"slices"
 	"strconv"
@@ -36,7 +42,25 @@ type Record struct {
 	AltFt      float64 `json:"alt"`
 	GSKt       float64 `json:"gs"`
 	HeadingDeg float64 `json:"hdg"`
+
+	// Recorded traces only. Node is the node that received the report, and
+	// DelayMS how long after the observation it arrived, so the aircraft was
+	// observed at TMS - DelayMS. Synthetic traces leave both zero: every node
+	// in range receives the report the moment it is made.
+	Node    string `json:"node,omitempty"`
+	DelayMS int64  `json:"delay_ms,omitempty"`
 }
+
+// MaxDelay bounds a recorded report's delivery delay: a position older than
+// adsb.MaxPositionAge is dropped at the source, plus room for feed lag.
+const MaxDelay = 2 * time.Minute
+
+// ObservedMS is when the aircraft was observed, in ms after the trace start.
+func (r Record) ObservedMS() int64 { return r.TMS - r.DelayMS }
+
+// For reports whether the node with this id receives r: a synthetic report
+// goes to every node, a recorded one only to the node that recorded it.
+func (r Record) For(id string) bool { return r.Node == "" || r.Node == id }
 
 // The generated airspace: a box around northern Virginia.
 const (
@@ -94,7 +118,46 @@ func Write(w io.Writer, recs []Record) error {
 	return bw.Flush()
 }
 
-var icaoRe = regexp.MustCompile(`^[0-9A-F]{6}$`)
+var (
+	icaoRe = regexp.MustCompile(`^[0-9A-F]{6}$`)
+	nodeRe = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
+)
+
+// Open reads a trace file, gunzipping it if the name ends in .gz.
+func Open(path string) ([]Record, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var r io.Reader = f
+	if strings.HasSuffix(path, ".gz") {
+		gz, err := gzip.NewReader(f)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", path, err)
+		}
+		defer gz.Close()
+		r = gz
+	}
+	recs, err := Read(r)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return recs, nil
+}
+
+// Window returns the records with from <= t_ms < from+length, shifted so the
+// window starts at 0. length 0 means to the end.
+func Window(recs []Record, from, length int64) []Record {
+	var out []Record
+	for _, r := range recs {
+		if r.TMS >= from && (length == 0 || r.TMS < from+length) {
+			r.TMS -= from
+			out = append(out, r)
+		}
+	}
+	return out
+}
 
 // Read parses and validates a trace. Lines must be sorted by t_ms.
 func Read(r io.Reader) ([]Record, error) {
@@ -139,6 +202,12 @@ func check(r Record) error {
 	if r.Lat < -90 || r.Lat > 90 || r.Lon < -180 || r.Lon > 180 {
 		return fmt.Errorf("position %v,%v out of range", r.Lat, r.Lon)
 	}
+	if r.Node != "" && !nodeRe.MatchString(r.Node) {
+		return fmt.Errorf("node %q: want 1-32 of [a-z0-9-]", r.Node)
+	}
+	if r.DelayMS < 0 || r.DelayMS > MaxDelay.Milliseconds() {
+		return fmt.Errorf("delay_ms %d: want 0 to %d", r.DelayMS, MaxDelay.Milliseconds())
+	}
 	return nil
 }
 
@@ -169,10 +238,25 @@ func ParseCircle(s string) (Circle, error) {
 // Contains reports whether a position is within the circle, by great-circle
 // distance on a spherical Earth.
 func (c Circle) Contains(lat, lon float64) bool {
-	return haversineKm(c.Lat, c.Lon, lat, lon) <= c.RadiusKm
+	return DistanceKm(c.Lat, c.Lon, lat, lon) <= c.RadiusKm
 }
 
-func haversineKm(lat1, lon1, lat2, lon2 float64) float64 {
+// Enclosing returns a circle around the given circles' centers' mean that
+// contains every one of them: one feed query that covers several nodes.
+func Enclosing(cs []Circle) Circle {
+	var out Circle
+	for _, c := range cs {
+		out.Lat += c.Lat / float64(len(cs))
+		out.Lon += c.Lon / float64(len(cs))
+	}
+	for _, c := range cs {
+		out.RadiusKm = max(out.RadiusKm, DistanceKm(out.Lat, out.Lon, c.Lat, c.Lon)+c.RadiusKm)
+	}
+	return out
+}
+
+// DistanceKm is the great-circle distance on a spherical Earth.
+func DistanceKm(lat1, lon1, lat2, lon2 float64) float64 {
 	const earthKm = 6371.0088 // mean radius
 	rad := math.Pi / 180
 	dLat, dLon := (lat2-lat1)*rad, (lon2-lon1)*rad

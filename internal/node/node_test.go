@@ -485,3 +485,23 @@ func TestStartupHoldEndsOnASyncTick(t *testing.T) {
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// Last-writer-wins orders writes, not observations: a sensor that reports an
+// older position after a peer delivered a newer one moves the picture back.
+// The node can't stop that without changing the merge rule, but it counts it.
+func TestIngestRegressCountsAnOlderLocalReportWinning(t *testing.T) {
+	n, _ := newLoneNode(t)
+	newer := crdt.Track{Obs: obs(200), TS: hlc.Timestamp{WallMS: time.Now().UnixMilli()}, Origin: "b"}
+	if err := n.receive(newer.TS, map[crdt.ICAO]crdt.Track{"AAAAA1": newer}); err != nil {
+		t.Fatal(err)
+	}
+	n.Ingest("AAAAA1", obs(100)) // the local sensor heard an older position
+	n.Ingest("AAAAA2", obs(100)) // a first report regresses nothing
+	n.Ingest("AAAAA2", obs(300)) // and neither does a fresher one
+	if got := n.tracks.Snapshot()["AAAAA1"].Obs.ObservedAtMS; got != 100 {
+		t.Fatalf("stored the report from %d; last-writer-wins should have kept the local write", got)
+	}
+	if c := n.Counters(); c.IngestRegress != 1 || c.IngestLost != 0 {
+		t.Fatalf("ingest_regress=%d ingest_lost=%d, want 1 and 0", c.IngestRegress, c.IngestLost)
+	}
+}

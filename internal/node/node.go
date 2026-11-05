@@ -78,6 +78,14 @@ type Config struct {
 	// holds: it makes no ordering promise to keep.
 	StartupHold time.Duration
 
+	// TrackTTL drops an aircraft whose stored stamp is older than this, so
+	// a live picture doesn't grow forever. A node also refuses an incoming
+	// track it has already expired and never asks a peer for one, so an
+	// expired version can't come back. Replicas agree on what has expired to
+	// within their clock spread. Default 5 minutes; negative keeps every
+	// track forever.
+	TrackTTL time.Duration
+
 	Client *http.Client     // default: 2s timeout
 	Now    func() time.Time // true time; default time.Now
 	Logger *slog.Logger     // default: discard
@@ -85,23 +93,33 @@ type Config struct {
 
 // Counters are cumulative since start.
 type Counters struct {
-	IngestTotal  int64 `json:"ingest_total"`
-	IngestLost   int64 `json:"ingest_lost"`   // a local observation lost to an older one already stored
-	IngestHeld   int64 `json:"ingest_held"`   // a local observation arrived during the startup hold
-	MergeApplied int64 `json:"merge_applied"` // a received track won its merge
-	MergeStale   int64 `json:"merge_stale"`   // a received track lost or was a redelivery
-	MergeRegress int64 `json:"merge_regress"` // a received track won but was older than what it replaced
-	SyncOK       int64 `json:"sync_ok"`
-	SyncErr      int64 `json:"sync_err"`
-	Rejected     int64 `json:"rejected"`  // inbound messages refused at the trust boundary
-	Aborted      int64 `json:"aborted"`   // inbound requests cut off before the whole body arrived
-	BytesOut     int64 `json:"bytes_out"` // request bodies this node sent as initiator, for answered requests
-	BytesIn      int64 `json:"bytes_in"`  // response bodies this node received as initiator
+	IngestTotal int64 `json:"ingest_total"`
+	IngestLost  int64 `json:"ingest_lost"` // a local observation lost to an older one already stored
+	IngestHeld  int64 `json:"ingest_held"` // a local observation arrived during the startup hold
+	// IngestRegress: a local observation replaced a stored one that was
+	// observed later. Last-writer-wins orders writes, not observations, so a
+	// sensor that hears an old position after a peer delivered a newer one
+	// moves the picture back. Synthetic traces can't cause it; live feeds can.
+	IngestRegress int64 `json:"ingest_regress"`
+	SensorErrors  int64 `json:"sensor_errors"` // failed polls of this node's live feed
+	MergeApplied  int64 `json:"merge_applied"` // a received track won its merge
+	MergeStale    int64 `json:"merge_stale"`   // a received track lost or was a redelivery
+	MergeRegress  int64 `json:"merge_regress"` // a received track won but was older than what it replaced
+	MergeExpired  int64 `json:"merge_expired"` // a received track had already expired here
+	Expired       int64 `json:"expired"`       // aircraft dropped by TrackTTL
+	SyncOK        int64 `json:"sync_ok"`
+	SyncErr       int64 `json:"sync_err"`
+	Rejected      int64 `json:"rejected"`  // inbound messages refused at the trust boundary
+	Aborted       int64 `json:"aborted"`   // inbound requests cut off before the whole body arrived
+	BytesOut      int64 `json:"bytes_out"` // request bodies this node sent as initiator, for answered requests
+	BytesIn       int64 `json:"bytes_in"`  // response bodies this node received as initiator
 }
 
 type counters struct {
 	ingestTotal, ingestLost, ingestHeld    atomic.Int64
+	ingestRegress, sensorErrors            atomic.Int64
 	mergeApplied, mergeStale, mergeRegress atomic.Int64
+	mergeExpired, expired                  atomic.Int64
 	syncOK, syncErr, rejected, aborted     atomic.Int64
 	bytesOut, bytesIn                      atomic.Int64
 }
@@ -112,6 +130,8 @@ type Node struct {
 	peers    []string
 	interval time.Duration
 	maxDrift time.Duration
+	ttl      time.Duration
+	cut      atomic.Int64 // the highest expiry cutoff so far; see cutoff
 	trueNow  func() time.Time
 	physNow  func() time.Time
 	clock    *hlc.Clock
@@ -146,6 +166,9 @@ func New(cfg Config) (*Node, error) {
 	if cfg.StartupHold == 0 {
 		cfg.StartupHold = cfg.MaxDrift
 	}
+	if cfg.TrackTTL == 0 {
+		cfg.TrackTTL = 5 * time.Minute
+	}
 	if cfg.SyncInterval < 0 || cfg.MaxDrift < 0 {
 		return nil, errors.New("sync interval and max drift must be positive")
 	}
@@ -165,6 +188,7 @@ func New(cfg Config) (*Node, error) {
 		peers:    cfg.Peers,
 		interval: cfg.SyncInterval,
 		maxDrift: cfg.MaxDrift,
+		ttl:      cfg.TrackTTL,
 		trueNow:  trueNow,
 		physNow:  physNow,
 		clock:    hlc.New(physNow, cfg.Wall),
@@ -173,6 +197,7 @@ func New(cfg Config) (*Node, error) {
 		log:      cfg.Logger.With("node", cfg.ID),
 		own:      map[crdt.ICAO]int64{},
 	}
+	n.cut.Store(math.MinInt64)
 	if cfg.StartupHold > 0 && !cfg.Wall {
 		n.held = map[crdt.ICAO]crdt.Observation{}
 		n.holdUntilMS = physNow().Add(cfg.StartupHold).UnixMilli()
@@ -220,10 +245,44 @@ func (n *Node) holding() bool {
 // merge can land between taking the stamp and storing it.
 func (n *Node) stamp(id crdt.ICAO, obs crdt.Observation) {
 	won, prev := n.tracks.Put(id, crdt.Track{Obs: obs, TS: n.clock.Now(), Origin: n.id})
-	if !won && prev.Obs.ObservedAtMS < obs.ObservedAtMS {
+	switch {
+	case !won && prev.Obs.ObservedAtMS < obs.ObservedAtMS:
 		n.c.ingestLost.Add(1)
+	case won && prev.Origin != "" && obs.ObservedAtMS < prev.Obs.ObservedAtMS:
+		n.c.ingestRegress.Add(1)
 	}
 }
+
+// cutoff is the wall time before which a stored stamp has expired. It only
+// moves forward: a physical clock can step back (an NTP correction does), and
+// a cutoff that followed it would let a peer hand back a version this node
+// already dropped.
+func (n *Node) cutoff() int64 {
+	if n.ttl < 0 {
+		return math.MinInt64
+	}
+	c := n.physNow().Add(-n.ttl).UnixMilli()
+	for {
+		old := n.cut.Load()
+		if c <= old || n.cut.CompareAndSwap(old, c) {
+			return max(c, old)
+		}
+	}
+}
+
+// expire drops the aircraft whose tracks have expired.
+func (n *Node) expire() {
+	cut := n.cutoff()
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for _, id := range n.tracks.Expire(cut) {
+		delete(n.own, id)
+		n.c.expired.Add(1)
+	}
+}
+
+// SensorFailed counts a failed poll of this node's live feed.
+func (n *Node) SensorFailed() { n.c.sensorErrors.Add(1) }
 
 // receive validates a message from a peer, advances the clock past every
 // stamp in it, then merges its tracks. The clock moves first, under the same
@@ -233,6 +292,7 @@ func (n *Node) receive(msgTS hlc.Timestamp, tracks map[crdt.ICAO]crdt.Track) err
 		n.c.rejected.Add(1)
 		return err
 	}
+	cut := n.cutoff()
 	high := msgTS
 	for _, t := range tracks {
 		if t.TS.Compare(high) > 0 {
@@ -243,6 +303,10 @@ func (n *Node) receive(msgTS hlc.Timestamp, tracks map[crdt.ICAO]crdt.Track) err
 	defer n.mu.Unlock()
 	n.clock.Update(high)
 	for id, t := range tracks {
+		if t.TS.WallMS < cut {
+			n.c.mergeExpired.Add(1)
+			continue
+		}
 		won, prev := n.tracks.Put(id, t)
 		switch {
 		case !won:
@@ -389,6 +453,7 @@ func (n *Node) syncOnce(ctx context.Context, peer string) error {
 	n.mu.Lock()
 	n.holding() // the hold ends on a tick even if no new report arrives
 	n.mu.Unlock()
+	n.expire()
 	req := syncRequest{From: n.id, HLC: n.clock.Now(), Digest: n.tracks.Digest()}
 	var resp syncResponse
 	if err := n.post(ctx, peer+"/sync", req, &resp); err != nil {
@@ -472,6 +537,11 @@ func (n *Node) handleSync(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	n.expire()
+	// Never ask for a version this node has already expired: it would only
+	// be refused on arrival.
+	cut := n.cutoff()
+	maps.DeleteFunc(req.Digest, func(_ crdt.ICAO, v crdt.Version) bool { return v.TS.WallMS < cut })
 	newer, want := n.tracks.Diff(req.Digest)
 	writeJSON(w, syncResponse{HLC: n.clock.Now(), Tracks: newer, Want: want})
 }
@@ -582,7 +652,9 @@ func (n *Node) Counters() Counters {
 	c := &n.c
 	return Counters{
 		IngestTotal: c.ingestTotal.Load(), IngestLost: c.ingestLost.Load(), IngestHeld: c.ingestHeld.Load(),
+		IngestRegress: c.ingestRegress.Load(), SensorErrors: c.sensorErrors.Load(),
 		MergeApplied: c.mergeApplied.Load(), MergeStale: c.mergeStale.Load(), MergeRegress: c.mergeRegress.Load(),
+		MergeExpired: c.mergeExpired.Load(), Expired: c.expired.Load(),
 		SyncOK: c.syncOK.Load(), SyncErr: c.syncErr.Load(), Rejected: c.rejected.Load(), Aborted: c.aborted.Load(),
 		BytesOut: c.bytesOut.Load(), BytesIn: c.bytesIn.Load(),
 	}
@@ -604,9 +676,13 @@ func (n *Node) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 		{"holdfast_ingest_total", "counter", "Local observations ingested.", "", c.IngestTotal},
 		{"holdfast_ingest_lost_total", "counter", "Local observations that lost to an older stored one.", "", c.IngestLost},
 		{"holdfast_ingest_held_total", "counter", "Local observations that arrived during the startup hold.", "", c.IngestHeld},
+		{"holdfast_ingest_regress_total", "counter", "Local observations that replaced a stored one observed later.", "", c.IngestRegress},
+		{"holdfast_sensor_errors_total", "counter", "Failed polls of this node's live feed.", "", c.SensorErrors},
 		{"holdfast_merge_applied_total", "counter", "Received tracks that won their merge.", "", c.MergeApplied},
 		{"holdfast_merge_stale_total", "counter", "Received tracks that lost or were redeliveries.", "", c.MergeStale},
 		{"holdfast_merge_regress_total", "counter", "Received tracks that won but were older than what they replaced.", "", c.MergeRegress},
+		{"holdfast_merge_expired_total", "counter", "Received tracks that had already expired here.", "", c.MergeExpired},
+		{"holdfast_expired_total", "counter", "Aircraft dropped because their track expired.", "", c.Expired},
 		{"holdfast_sync_requests_total", "counter", "Sync rounds by outcome.", `result="ok"`, c.SyncOK},
 		{"holdfast_sync_requests_total", "counter", "", `result="err"`, c.SyncErr},
 		{"holdfast_rejected_total", "counter", "Inbound messages refused at the trust boundary.", "", c.Rejected},

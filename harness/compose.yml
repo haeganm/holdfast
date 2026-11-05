@@ -21,7 +21,7 @@ services:
       mesh: { ipv4_address: 172.30.0.11 }
       ctl: {}
     command: ["-id=a", "-peers=${A_PEERS}", "-clock=${CLOCK}", "-sync-timeout=${SYNC_TIMEOUT:-2s}", "-clock-offset-ms=${A_OFFSET:-0}",
-              "-trace=/traces/seed1.jsonl", "-coverage=39.0,-77.0,60", "-t0=${T0}", "-trace-ms=${TRACE_MS}"]
+              "${SOURCE:--trace=/traces/seed1.jsonl}", "-trace-from-ms=${TRACE_FROM_MS:-0}", "-live-interval=${LIVE_INTERVAL:-9s}", "-live-offset=0s", "-coverage=39.0,-77.0,60", "-t0=${T0}", "-trace-ms=${TRACE_MS}"]
   b:
     <<: *node
     container_name: hf-b
@@ -30,7 +30,7 @@ services:
       mesh: { ipv4_address: 172.30.0.12 }
       ctl: {}
     command: ["-id=b", "-peers=${B_PEERS}", "-clock=${CLOCK}", "-sync-timeout=${SYNC_TIMEOUT:-2s}", "-clock-offset-ms=${B_OFFSET:-0}",
-              "-trace=/traces/seed1.jsonl", "-coverage=39.0,-76.2,60", "-t0=${T0}", "-trace-ms=${TRACE_MS}"]
+              "${SOURCE:--trace=/traces/seed1.jsonl}", "-trace-from-ms=${TRACE_FROM_MS:-0}", "-live-interval=${LIVE_INTERVAL:-9s}", "-live-offset=3s", "-coverage=39.0,-76.2,60", "-t0=${T0}", "-trace-ms=${TRACE_MS}"]
   c:
     <<: *node
     container_name: hf-c
@@ -39,7 +39,7 @@ services:
       mesh: { ipv4_address: 172.30.0.13 }
       ctl: {}
     command: ["-id=c", "-peers=${C_PEERS}", "-clock=${CLOCK}", "-sync-timeout=${SYNC_TIMEOUT:-2s}", "-clock-offset-ms=${C_OFFSET:-0}",
-              "-trace=/traces/seed1.jsonl", "-coverage=39.0,-77.8,60", "-t0=${T0}", "-trace-ms=${TRACE_MS}"]
+              "${SOURCE:--trace=/traces/seed1.jsonl}", "-trace-from-ms=${TRACE_FROM_MS:-0}", "-live-interval=${LIVE_INTERVAL:-9s}", "-live-offset=6s", "-coverage=39.0,-77.8,60", "-t0=${T0}", "-trace-ms=${TRACE_MS}"]
   hub:
     <<: *node
     profiles: [star]
@@ -49,6 +49,34 @@ services:
       mesh: { ipv4_address: 172.30.0.10 }
       ctl: {}
     command: ["-id=hub", "-peers=", "-clock=${CLOCK}", "-sync-timeout=${SYNC_TIMEOUT:-2s}"]
+
+  # run.py --obs. Both sit only on ctl, so they keep scraping a node the mesh
+  # has cut off.
+  prometheus:
+    image: prom/prometheus:v3.15.1@sha256:fa3302279710be2f21a8301ec17a8b4f2301fd829bd113839b3b6b02b6f191a2
+    profiles: [obs]
+    container_name: hf-prometheus
+    ports: ["127.0.0.1:9090:9090"]
+    networks: [ctl]
+    volumes:
+      - ./obs/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+  grafana:
+    image: grafana/grafana:13.2.5@sha256:9f7aa1e1e3246aade5792d35a738049f7f32f89cd51d1956cf426a4e86268a84
+    profiles: [obs]
+    container_name: hf-grafana
+    ports: ["127.0.0.1:3000:3000"]
+    networks: [ctl]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_MIN_REFRESH_INTERVAL: 1s
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/holdfast.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - ./obs/grafana.yml:/etc/grafana/provisioning/datasources/holdfast.yml:ro
+      - ./obs/grafana.yml:/etc/grafana/provisioning/dashboards/holdfast.yml:ro
+      - ./obs/dashboards:/var/lib/grafana/dashboards:ro
 
 networks:
   mesh:

@@ -38,7 +38,7 @@ class AnalyzeTest(unittest.TestCase):
         cfg = h.Config("test", "mesh", "loss0", "hlc", 0)
         self.exp = h.Run(cfg, 0, duration_ms=10_000, settle_ms_window=5000)
         c0 = {"sync_ok": 10, "sync_err": 4, "ingest_total": 0}
-        c1 = {"sync_ok": 30, "sync_err": 4, "ingest_total": 9}
+        c1 = {"sync_ok": 30, "sync_err": 4, "ingest_total": 9, "merge_applied": 3}
         self.exp.polls = [
             poll(0, a=state(0, {}, "e", c0), b=state(0, {}, "e", c0), c=state(0, {}, "e", c0)),
             poll(5000, a=state(5000, mine, "1"), b=state(5000, {}, "e"), c=state(5000, {}, "e")),
@@ -71,6 +71,12 @@ class AnalyzeTest(unittest.TestCase):
         self.assertEqual(row["sync_err"], 0)
         self.assertEqual(row["ingest_total"], 27)
         self.assertEqual(row["wrong_final"], 0)
+
+    def test_bytes_per_report_and_per_useful_update(self):
+        self.exp.tx = {"start": {n: 100 for n in h.EDGES}, "end": {n: 400 for n in h.EDGES}}
+        row = self.analyze()
+        self.assertEqual(row["wire_bytes_per_obs"], 33.3)  # 900 bytes over 27 reports
+        self.assertEqual(row["wire_bytes_per_useful"], 100.0)  # 900 bytes over 9 winning merges
 
     def test_unequal_hashes_never_settle(self):
         last = self.exp.polls[-1].states
@@ -122,6 +128,79 @@ class MergedDuringCutTest(unittest.TestCase):
         self.assertEqual(h.merged_during_cut(run), 6)
         run.events.pop("heal")
         self.assertEqual(h.merged_during_cut(run), "")
+
+
+class StalenessTest(unittest.TestCase):
+    def test_age_of_what_each_node_holds_while_the_aircraft_is_active(self):
+        cfg = h.Config("test", "mesh", "loss0", "hlc", 0)
+        run = h.Run(cfg, 0, duration_ms=10_000, settle_ms_window=0)
+        r = T0 + 4000
+        mine = {"AAAAAA": {"ts": {}, "origin": "a", "at": r, "own": r}}
+        older = {"AAAAAA": {"ts": {}, "origin": "a", "at": T0 + 3000}}
+        held = {"AAAAAA": {"ts": {}, "origin": "a", "at": r}}
+        run.polls = [
+            # a just reported it; b holds a report 1 s older; c holds nothing,
+            # so it counts from the aircraft's first report
+            poll(4000, a=state(4000, mine), b=state(4000, older), c=state(4000, {})),
+            poll(4600, a=state(4600, mine), b=state(4600, held), c=state(4600, {})),
+            # 5.5 s after the last report the aircraft no longer counts
+            poll(9500, a=state(9500, mine), b=state(9500, held), c=state(9500, held)),
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            row = h.analyze(run, Path(d) / "polls.csv")
+        # samples: 0, 1000, 0 at 4000 and 600, 600, 600 at 4600
+        self.assertEqual(row["stale_p50"], 600)
+        self.assertEqual(row["stale_p99"], 1000)
+
+
+class DivergenceTest(unittest.TestCase):
+    SAME = {"ts": {"w": 1, "l": 0}, "origin": "a", "at": 1}
+    OTHER = {"ts": {"w": 2, "l": 0}, "origin": "b", "at": 2}
+
+    def states(self, a, b, c):
+        return {"a": {"tracks": a}, "b": {"tracks": b}, "c": {"tracks": c}}
+
+    def test_fraction_of_aircraft_the_edges_disagree_on(self):
+        s, o = self.SAME, self.OTHER
+        self.assertEqual(h.divergence(self.states({"X": s, "Y": s}, {"X": s, "Y": o}, {"X": s, "Y": s})), 0.5)
+        self.assertEqual(h.divergence(self.states({"X": s}, {"X": s}, {"X": s})), 0.0)
+
+    def test_an_aircraft_one_edge_lacks_counts_as_divergent(self):
+        s = self.SAME
+        self.assertEqual(h.divergence(self.states({"X": s}, {"X": s}, {})), 1.0)
+
+    def test_nothing_held_is_not_a_sample(self):
+        self.assertIsNone(h.divergence(self.states({}, {}, {})))
+
+
+class CatchupTest(unittest.TestCase):
+    def run_with(self, polls):
+        run = h.Run(h.Config("test", "mesh", "partition", "hlc", 0), 0, duration_ms=20_000, settle_ms_window=0)
+        run.events = {"cut": 4000, "cut_exec": 100, "heal": 8000}
+        run.polls = polls
+        return h.catchup(run)
+
+    def held(self, at, own=0):
+        tr = {"ts": {}, "origin": "a", "at": T0 + at}
+        if own:
+            tr["own"] = T0 + own
+        return {"XXXXXX": tr}
+
+    def test_time_until_every_edge_holds_what_was_reported_by_the_heal(self):
+        polls = [
+            poll(7900, a=state(7900, self.held(7500, 7500)), b=state(7900, self.held(7000)), c=state(7900, self.held(7000))),
+            poll(8000, a=state(8000, self.held(7500, 7500)), b=state(8000, self.held(7000)), c=state(8000, self.held(7500))),
+            # a has moved on to a newer report, which the heal can't be blamed for
+            poll(8300, a=state(8300, self.held(8200, 8200)), b=state(8300, self.held(7500)), c=state(8300, self.held(7500))),
+        ]
+        self.assertEqual(self.run_with(polls), 300)
+
+    def test_never(self):
+        polls = [
+            poll(7900, a=state(7900, self.held(7500, 7500)), b=state(7900, self.held(7000)), c=state(7900, self.held(7000))),
+            poll(9000, a=state(9000, self.held(7500, 7500)), b=state(9000, self.held(7000)), c=state(9000, self.held(7500))),
+        ]
+        self.assertEqual(self.run_with(polls), "")
 
 
 class RecoveryP95Test(unittest.TestCase):
@@ -184,3 +263,14 @@ class RawRoundTripTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SourceTest(unittest.TestCase):
+    def test_sources_map_to_node_flags(self):
+        self.assertEqual(h.source_flag("seed1"), "-trace=/traces/seed1.jsonl")
+        self.assertEqual(h.source_flag("live"), f"-live-url={h.FEED}")
+
+    def test_a_trace_must_be_a_file_under_traces(self):
+        for bad in ("../harness/run.py", "nope.jsonl", "sub/dir.jsonl"):
+            with self.assertRaises(RuntimeError):
+                h.source_flag(bad)

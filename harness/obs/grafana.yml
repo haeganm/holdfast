@@ -1,0 +1,21 @@
+# Grafana provisioning: the Prometheus datasource and the holdfast dashboard.
+# Mounted at /etc/grafana/provisioning/datasources and .../dashboards.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prom
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      timeInterval: 1s
+
+providers:
+  - name: holdfast
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards

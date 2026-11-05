@@ -57,6 +57,38 @@ func TestCompareIsATotalOrder(t *testing.T) {
 	}
 }
 
+// Expiry has to commute with merging, or two replicas that expire at the
+// same cutoff could still end up different, and expiry would need tombstones.
+func TestExpireCommutesWithMerge(t *testing.T) {
+	prop := func(seed uint64) bool {
+		r := rng(seed)
+		cutoff := int64(r.IntN(5))
+		a, b := NewMap(), NewMap()
+		for range 8 {
+			a.Put(ICAO(fmt.Sprintf("A%05d", r.IntN(4))), genTrack(r))
+			b.Put(ICAO(fmt.Sprintf("A%05d", r.IntN(4))), genTrack(r))
+		}
+		merged := NewMap()
+		merged.MergeAll(a.Snapshot())
+		merged.MergeAll(b.Snapshot())
+		merged.Expire(cutoff)
+		a.Expire(cutoff)
+		b.Expire(cutoff)
+		separately := NewMap()
+		separately.MergeAll(a.Snapshot())
+		separately.MergeAll(b.Snapshot())
+		for _, t := range separately.Snapshot() {
+			if t.TS.WallMS < cutoff {
+				return false
+			}
+		}
+		return merged.Hash() == separately.Hash()
+	}
+	if err := quick.Check(prop, propertyConfig(t)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMergeIsCommutativeAssociativeIdempotent(t *testing.T) {
 	prop := func(seed uint64) bool {
 		r := rng(seed)

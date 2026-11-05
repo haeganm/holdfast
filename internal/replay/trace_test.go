@@ -2,8 +2,11 @@ package replay
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"math"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -69,6 +72,9 @@ func TestReadRejectsBadLines(t *testing.T) {
 		{"unknown field", `{"t_ms":0,"icao":"ABCDEF","lat":39,"lon":-77,"alt":1,"gs":1,"hdg":1,"x":1}`, "line 1: json: unknown field"},
 		{"latitude", `{"t_ms":0,"icao":"ABCDEF","lat":91,"lon":-77,"alt":1,"gs":1,"hdg":1}`, "out of range"},
 		{"garbage", ok + "\nnot json", "line 2:"},
+		{"bad node", `{"t_ms":0,"icao":"ABCDEF","lat":39,"lon":-77,"alt":1,"gs":1,"hdg":1,"node":"A B"}`, "node"},
+		{"negative delay", `{"t_ms":0,"icao":"ABCDEF","lat":39,"lon":-77,"alt":1,"gs":1,"hdg":1,"delay_ms":-1}`, "delay_ms"},
+		{"absurd delay", `{"t_ms":0,"icao":"ABCDEF","lat":39,"lon":-77,"alt":1,"gs":1,"hdg":1,"delay_ms":3600000}`, "delay_ms"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := Read(strings.NewReader(tc.input))
@@ -79,13 +85,74 @@ func TestReadRejectsBadLines(t *testing.T) {
 	}
 }
 
+func TestRecordedFieldsRoundTripThroughAGzippedFile(t *testing.T) {
+	recs := []Record{
+		{TMS: 100, ICAO: "A1B2C3", Lat: 39, Lon: -77, Node: "a", DelayMS: 400},
+		{TMS: 900, ICAO: "A1B2C3", Lat: 39.01, Lon: -77, Node: "b", DelayMS: 0},
+		{TMS: 1500, ICAO: "D4E5F6", Lat: 38.9, Lon: -76.9},
+	}
+	path := filepath.Join(t.TempDir(), "t.jsonl.gz")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gz := gzip.NewWriter(f)
+	if err := Write(gz, recs); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	got, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got, recs) {
+		t.Fatalf("round trip:\n got %+v\nwant %+v", got, recs)
+	}
+	if got[0].ObservedMS() != -300 || got[2].ObservedMS() != 1500 {
+		t.Fatalf("observed at %d and %d", got[0].ObservedMS(), got[2].ObservedMS())
+	}
+	if !got[0].For("a") || got[0].For("b") || !got[2].For("b") {
+		t.Fatal("a recorded report must go only to its own node, a synthetic one to every node")
+	}
+}
+
+func TestWindowShiftsToZero(t *testing.T) {
+	recs := []Record{{TMS: 500}, {TMS: 60_000}, {TMS: 119_999}, {TMS: 120_000}}
+	got := Window(recs, 60_000, 60_000)
+	if len(got) != 2 || got[0].TMS != 0 || got[1].TMS != 59_999 {
+		t.Fatalf("window: %+v", got)
+	}
+	if len(Window(recs, 0, 0)) != 4 {
+		t.Fatal("length 0 must mean to the end")
+	}
+}
+
+func TestEnclosingCoversEveryCircle(t *testing.T) {
+	cs := []Circle{{39.0, -77.0, 60}, {39.0, -76.2, 60}, {39.0, -77.8, 60}}
+	e := Enclosing(cs)
+	for _, c := range cs {
+		// the far edge of each circle, east and west
+		for _, dLon := range []float64{-0.78, 0.78} {
+			if c.Contains(c.Lat, c.Lon+dLon) && !e.Contains(c.Lat, c.Lon+dLon) {
+				t.Fatalf("enclosing %+v misses the edge of %+v", e, c)
+			}
+		}
+	}
+	if e.RadiusKm > 200 {
+		t.Fatalf("enclosing radius %v km is far larger than needed", e.RadiusKm)
+	}
+}
+
 func TestCircle(t *testing.T) {
 	c, err := ParseCircle("39, -77, 100")
 	if err != nil {
 		t.Fatal(err)
 	}
 	// One degree of latitude is about 111.2 km.
-	if d := haversineKm(39, -77, 40, -77); math.Abs(d-111.2) > 0.2 {
+	if d := DistanceKm(39, -77, 40, -77); math.Abs(d-111.2) > 0.2 {
 		t.Fatalf("one degree of latitude = %.2f km, want about 111.2", d)
 	}
 	if !c.Contains(39.8, -77) || c.Contains(40, -77) {

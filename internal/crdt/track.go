@@ -169,6 +169,24 @@ func (m *Map) Diff(peer map[ICAO]Version) (newer map[ICAO]Track, want []ICAO) {
 	return newer, want
 }
 
+// Expire drops every track stamped before cutoffMS (wall time) and returns
+// the aircraft it dropped, sorted. Whether a track has expired depends only
+// on its stamp and the cutoff, so expiring commutes with merging: replicas
+// that expire at the same cutoff hold the same tracks, with no tombstones.
+func (m *Map) Expire(cutoffMS int64) []ICAO {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var gone []ICAO
+	for id, t := range m.m {
+		if t.TS.WallMS < cutoffMS {
+			delete(m.m, id)
+			gone = append(gone, id)
+		}
+	}
+	slices.Sort(gone)
+	return gone
+}
+
 // Get returns the stored tracks for the given aircraft, skipping any this
 // replica does not hold.
 func (m *Map) Get(ids []ICAO) map[ICAO]Track {

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
@@ -48,7 +49,7 @@ func TestSimulation(t *testing.T) {
 			continue // a single replayed seed can't be held to totals
 		}
 		min := len(seeds) // at least about one of each per schedule
-		if cov.cleanRounds < 20*min || cov.restarts < min {
+		if cov.cleanRounds < 20*min || cov.restarts < min || cov.expired < min {
 			t.Errorf("wall=%v: schedules exercised too little: %+v", wall, *cov)
 		}
 		for kind, n := range cov.faults {
@@ -96,9 +97,19 @@ const (
 	// values get the same stamp and origin, which the content tie-break exists
 	// for.
 	simTickMS = 10
+	simTTL    = 10 * time.Second // short enough that tracks expire mid-schedule
 )
 
-var simAircraft = []crdt.ICAO{"A00001", "A00002", "A00003", "A00004", "A00005", "A00006"}
+// The airspace: a window of four aircraft slides along a pool of twelve, one
+// step every 5 s, so aircraft arrive, go quiet and expire the way real
+// traffic does. Four at a time keeps conflicts on one aircraft frequent.
+var simAircraft = []crdt.ICAO{"A00001", "A00002", "A00003", "A00004", "A00005", "A00006",
+	"A00007", "A00008", "A00009", "A0000A", "A0000B", "A0000C"}
+
+func (s *sim) aircraft() crdt.ICAO {
+	window := int((s.trueMS - simStartMS) / 5000)
+	return simAircraft[(window+s.rng.IntN(4))%len(simAircraft)]
+}
 
 type sim struct {
 	t      *testing.T
@@ -120,8 +131,8 @@ type sim struct {
 // TestSimulation fails if any count is too low, so a change that makes the
 // schedule vacuous (every round failing, no ties, no restarts) can't pass.
 type simCoverage struct {
-	cleanRounds, restarts, ties int
-	faults                      [5]int // lost, delayed, cut off, response lost, duplicated
+	cleanRounds, restarts, ties, expired int
+	faults                               [5]int // lost, delayed, cut off, response lost, duplicated
 }
 
 type simNode struct {
@@ -131,6 +142,7 @@ type simNode struct {
 	seen     map[crdt.ICAO]crdt.Track // the replica at the last check
 	clock    hlc.Timestamp            // the clock at the last check
 	floor    hlc.Timestamp            // the highest clock anywhere when this node last started
+	gone     map[crdt.ICAO]crdt.Track // versions this node expired, which must never come back
 }
 
 // heldRequest is a request the network delayed: the sender saw a failure,
@@ -176,13 +188,14 @@ func (s *sim) start(sn *simNode) {
 		Wall: s.wall,
 		// Now is this node's physical clock reading, error included: clock
 		// jumps change offsetMS under a running node, which ClockOffset can't.
-		Now:    func() time.Time { return time.UnixMilli(s.trueMS + sn.offsetMS) },
-		Client: &http.Client{Transport: simTransport{s, sn.id}},
+		Now:      func() time.Time { return time.UnixMilli(s.trueMS + sn.offsetMS) },
+		Client:   &http.Client{Transport: simTransport{s, sn.id}},
+		TrackTTL: simTTL,
 	})
 	if err != nil {
 		s.t.Fatal(err)
 	}
-	sn.n, sn.seen, sn.clock = n, nil, hlc.Timestamp{}
+	sn.n, sn.seen, sn.clock, sn.gone = n, nil, hlc.Timestamp{}, map[crdt.ICAO]crdt.Track{}
 }
 
 func (s *sim) failf(format string, args ...any) {
@@ -243,14 +256,14 @@ func (s *sim) run(steps int) {
 // millisecond, with a sync landing between them. Under the wall clock both
 // get the same stamp and origin, which is what the content tie-break is for.
 func (s *sim) burst(sn *simNode) {
-	id := simAircraft[s.rng.IntN(len(simAircraft))]
+	id := s.aircraft()
 	s.ingestAircraft(sn, id)
 	s.syncPair(sn)
 	s.ingestAircraft(sn, id)
 }
 
 func (s *sim) ingest(sn *simNode) {
-	s.ingestAircraft(sn, simAircraft[s.rng.IntN(len(simAircraft))])
+	s.ingestAircraft(sn, s.aircraft())
 }
 
 func (s *sim) ingestAircraft(sn *simNode, id crdt.ICAO) {
@@ -277,7 +290,8 @@ func (s *sim) syncPair(a *simNode) {
 	before := s.faults
 	err := a.n.syncOnce(context.Background(), "http://"+b.id)
 	if err == nil && s.faults == before {
-		if a.n.Hash() != b.n.Hash() {
+		cut := max(a.n.cutoff(), b.n.cutoff())
+		if live(a.n, cut) != live(b.n, cut) {
 			s.failf("a clean round between %s and %s left them different", a.id, b.id)
 		}
 		s.seen.cleanRounds++
@@ -285,6 +299,13 @@ func (s *sim) syncPair(a *simNode) {
 	if err != nil && s.faults == before && !s.cut[link(a.id, b.id)] {
 		s.failf("a round between %s and %s failed with no fault injected: %v", a.id, b.id, err)
 	}
+}
+
+// live hashes the tracks a node holds that are stamped at or after cut.
+func live(n *Node, cut int64) string {
+	snap := n.tracks.Snapshot()
+	maps.DeleteFunc(snap, func(_ crdt.ICAO, t crdt.Track) bool { return t.TS.WallMS < cut })
+	return crdt.HashOf(snap)
 }
 
 func (s *sim) deliverHeld() {
@@ -330,10 +351,21 @@ func (s *sim) check() {
 				}
 			}
 		}
+		for id, cur := range snap {
+			if g, ok := sn.gone[id]; ok && g.TS == cur.TS && g.Origin == cur.Origin {
+				s.failf("node %s holds %s at %v again after expiring it", sn.id, id, cur.TS)
+			}
+		}
+		cut := sn.n.cutoff()
 		for id, prev := range sn.seen {
 			cur, ok := snap[id]
 			if !ok {
-				s.failf("node %s dropped %s", sn.id, id)
+				if prev.TS.WallMS >= cut {
+					s.failf("node %s dropped %s, stamped %v, before it expired at %d", sn.id, id, prev.TS, cut)
+				}
+				sn.gone[id] = prev
+				s.seen.expired++
+				continue
 			}
 			if crdt.Compare(cur, prev) < 0 {
 				s.failf("node %s moved %s down from %+v to %+v", sn.id, id, prev, cur)
@@ -350,6 +382,9 @@ func (s *sim) settle() {
 	s.t.Helper()
 	s.faulty = false
 	clear(s.cut)
+	for _, sn := range s.nodes {
+		sn.offsetMS = 0 // replicas agree on expiry only to within their clock spread
+	}
 	for _, h := range s.held {
 		s.deliver(h.to, h.path, bytes.NewReader(h.body)).Body.Close()
 	}
@@ -367,8 +402,12 @@ func (s *sim) settle() {
 	s.check()
 
 	want := map[crdt.ICAO]crdt.Track{}
+	cut := s.nodes[0].n.cutoff()
 	for _, sn := range s.nodes {
 		for id, tr := range sn.n.tracks.Snapshot() {
+			if tr.TS.WallMS < cut {
+				continue
+			}
 			if cur, ok := want[id]; !ok || crdt.Compare(tr, cur) > 0 {
 				want[id] = tr
 			}
