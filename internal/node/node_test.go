@@ -43,6 +43,8 @@ func (c cutTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 type spec struct {
 	id     string
 	offset time.Duration
+	now    func() time.Time // nil: the real clock
+	ttl    time.Duration    // 0: the default track TTL
 }
 
 // startCluster starts fully meshed nodes that sync every 20 ms.
@@ -77,6 +79,8 @@ func startCluster(t *testing.T, wall bool, specs ...spec) map[string]*testNode {
 			SyncInterval: 20 * time.Millisecond,
 			Wall:         wall,
 			ClockOffset:  s.offset,
+			Now:          s.now,
+			TrackTTL:     s.ttl,
 			StartupHold:  -1, // fresh nodes, clocks within the test's offsets
 			Client:       &http.Client{Timeout: time.Second, Transport: cutTransport{tn, http.DefaultTransport}},
 		})
@@ -542,6 +546,41 @@ func TestRestoreLeavesOutExpiredTracks(t *testing.T) {
 }
 
 // A node with no peers has no sync rounds, and must still expire.
+// A partition longer than the track TTL. Each side expires what it stopped
+// hearing about, as a lone node would. At the heal the fresh versions merge,
+// and a version one side has already expired is refused, so nothing comes
+// back; until the slower clock expires it too, the two disagree on that track.
+func TestAPartitionLongerThanTheTTLBringsNothingBack(t *testing.T) {
+	var nowMS atomic.Int64
+	nowMS.Store(simStartMS)
+	now := func() time.Time { return time.UnixMilli(nowMS.Load()) }
+	ns := startCluster(t, false, spec{id: "a", offset: -2 * time.Second, now: now, ttl: time.Minute},
+		spec{id: "b", now: now, ttl: time.Minute})
+	a, b := ns["a"], ns["b"]
+	a.Ingest("AAAAA1", obs(1)) // reported once, then never again
+	a.Ingest("BBBBB1", obs(2)) // a keeps hearing this one through the cut
+	waitFor(t, "b to learn both aircraft", func() bool { return b.tracks.Len() == 2 })
+	stamp := a.tracks.Snapshot()["AAAAA1"].TS.WallMS
+
+	b.cut.Store(true)
+	// Past AAAAA1's expiry on b's clock, not yet on a's, which runs 2 s slow.
+	nowMS.Store(stamp + time.Minute.Milliseconds() + 1000)
+	a.Ingest("BBBBB1", obs(3))
+	waitFor(t, "b, cut off, to expire both aircraft", func() bool { return b.tracks.Len() == 0 })
+
+	b.cut.Store(false)
+	waitFor(t, "b to take the fresh report and refuse the version it had expired", func() bool {
+		return b.tracks.Len() == 1 && b.Counters().MergeExpired > 0
+	})
+	if _, back := b.tracks.Snapshot()["AAAAA1"]; back {
+		t.Fatal("an aircraft b had expired came back after the heal")
+	}
+	nowMS.Store(stamp + time.Minute.Milliseconds() + 3000) // a's clock gets there too
+	waitFor(t, "the two to agree once a expires it as well", func() bool {
+		return a.tracks.Len() == 1 && a.Hash() == b.Hash()
+	})
+}
+
 func TestALoneNodeStillExpires(t *testing.T) {
 	var nowMS atomic.Int64
 	nowMS.Store(simStartMS)
