@@ -56,3 +56,9 @@ The cloud relay (synthetic trace, against the registered star runs):
 Live traffic:
 
 13. Every live run settles with equal hashes. With c cut, every node catches up within 2 s of the heal (median). With the hub cut, the edges merge nothing from each other.
+
+## Corrections, made after the runs
+
+Kept apart so the text above stays as it was registered.
+
+- "68 of the recorder's 601 polls were refused": the recorder made 669 requests, 601 answered and 68 failed. Its poll counter counted only answered requests. The trace measurements above are computed from the trace itself and don't depend on the count.

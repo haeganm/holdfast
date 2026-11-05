@@ -161,8 +161,8 @@ def experiments(family: str) -> list[Config]:
     # larger than the interval between successive reports of an aircraft.
     clock = [Config("clock", "mesh", "loss0", c, k) for c in ("hlc", "wall") for k in (0, -500, -2000, 2000)]
     # Live traffic, inside the same harness: each edge polls the feed for its
-    # own circle every 9 s, the three 3 s apart, one request every 3 s in all
-    # (the feed refused faster). Never run alongside a recording.
+    # own circle every 18 s, the three 6 s apart, so one request every 6 s in
+    # all, half the rate the recorder kept up. Never run alongside a recording.
     live = [Config("live", t, s, "hlc", 0, "live") for t, s in
             (("mesh", "loss0"), ("mesh", "partition"), ("star", "hubdown"))]
     # The cloud relay against the registered star runs: same trace, same
