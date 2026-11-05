@@ -62,3 +62,5 @@ Live traffic:
 Kept apart so the text above stays as it was registered.
 
 - "68 of the recorder's 601 polls were refused": the recorder made 669 requests, 601 answered and 68 failed. Its poll counter counted only answered requests. The trace measurements above are computed from the trace itself and don't depend on the count.
+- "Consecutive reports of one aircraft from different nodes are never closer than 2.7 s": true of every pair that involves c, the only node whose clock is ever skewed (closest 2.67 s, c then a), but a then b comes as close as 2.37 s. a and b keep true time in every run, so predictions 7 and 8 rest only on the pairs with c, and stand as written.
+- "178 of 27,716 reports": 27,716 is every report after each aircraft's first (28,160 minus 444), since a first report can't arrive late.
