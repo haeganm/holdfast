@@ -17,6 +17,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import matplotlib
+import matplotlib.ticker
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
@@ -33,6 +34,13 @@ plt.rcParams.update({
     "axes.titlesize": 12, "axes.titleweight": "bold", "axes.titlelocation": "left",
     "legend.frameon": False,
 })
+
+
+def plain_log(ax) -> None:
+    """A log axis labelled 0.5, 1, 2, 5 rather than 10^0."""
+    fmt = matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:g}")
+    ax.yaxis.set_major_formatter(fmt)
+    ax.yaxis.set_minor_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:g}" if f"{v:g}"[0] in "25" else ""))
 
 
 def rows(path: Path) -> list[dict]:
@@ -91,6 +99,7 @@ def sync_latency(sync_dir: Path, out: Path) -> None:
         ax.errorbar(xs, med, yerr=[lo, hi], fmt="o", ms=8, color=color, ecolor=color, elinewidth=2,
                     capsize=0, mec=SURFACE, mew=2, label=topo, zorder=3)
     ax.set_yscale("log")
+    plain_log(ax)
     ax.set_xticks(range(len(SCENARIOS)), [LABELS[s] for s in SCENARIOS])
     ax.set_ylabel("p95 propagation latency (s, log scale)")
     ax.set_title("A second hop costs 2.4x; 50% loss costs the mesh 26x")
@@ -131,9 +140,13 @@ def clock_skew(clock_dir: Path, out: Path) -> None:
     plt.close(fig)
 
 
-def cell(vals: list[str], n: int) -> str:
+def cell(vals: list[str | None], n: int) -> str:
     """Median and min-max of a summary column over repeats; blank cells are
     runs where the metric never happened, and are counted, not dropped."""
+    if all(v is None for v in vals):
+        return "n/a"  # a column this sweep predates
+    if vals and not all(v == "" or v.replace(".", "", 1).lstrip("-").isdigit() for v in vals):
+        return " ".join(sorted(set(vals)))  # text, such as the commit
     got = [float(v) for v in vals if v != ""]
     if not got:
         return "never"
@@ -142,6 +155,10 @@ def cell(vals: list[str], n: int) -> str:
         return f"{x:g}"  # a median of an even count can end in .5; show it, don't truncate
     out = fmt(m) if a == b else f"{fmt(m)} ({fmt(a)}-{fmt(b)})"
     return out if len(got) == n else f"{out}, {n - len(got)}/{n} never"
+
+
+# Columns that only mean something when a run has a cut; blank otherwise, not "never".
+CUT_COLS = {"merged_cut", "catchup_ms", "catchup_merge_ms", "diverge_cut", "recover_p95_ms", "recover_all_ms"}
 
 
 def table(header: list[str], keys: list[tuple[str, ...]], cols: list[str],
@@ -153,7 +170,9 @@ def table(header: list[str], keys: list[tuple[str, ...]], cols: list[str],
         if not rs:
             continue
         settled = sum(r["settled"] == "True" for r in rs)
-        print("| " + " | ".join([*k, f"{settled}/{len(rs)}", *(cell([r[c] for r in rs], len(rs)) for c in cols)]) + " |")
+        cut = rs[0]["scenario"] in ("partition", "hubdown")
+        print("| " + " | ".join([*k, f"{settled}/{len(rs)}", *("" if c in CUT_COLS and not cut else cell([r.get(c) for r in rs], len(rs))
+                                                            for c in cols)]) + " |")
 
 
 def tables(sync_dir: Path, clock_dir: Path) -> None:
@@ -170,12 +189,54 @@ def tables(sync_dir: Path, clock_dir: Path) -> None:
     table(["clock", "skew_ms", "settled", *cols], keys, cols, clock, ["clock", "skew_ms"])
 
 
+SYNC_COLS = ["settle_ms", "prop_p50", "prop_p95", "prop_p99", "prop_unresolved", "stale_p50", "stale_p99",
+             "diverge_mean", "diverge_cut", "catchup_ms", "catchup_merge_ms", "merged_cut", "sync_err_rate",
+             "wire_bytes_per_useful", "ingest_lost", "ingest_regress", "merge_regress", "rejected"]
+
+
+def real_tables(hour_dir: Path | None, base_dir: Path | None, cloud_dir: Path | None, live_dir: Path | None,
+                sync_dir: Path) -> None:
+    """The newer families' tables, from the same summary.csv files the README cites."""
+    if hour_dir:
+        hour = rows(hour_dir / "summary.csv")
+        print(f"\n{hour_dir / 'summary.csv'}\n")
+        keys = [("mesh", s) for s in ("loss20", "loss50", "partition")]
+        table(["topology", "scenario", "settled", *SYNC_COLS, "feed_delay_p50", "feed_delay_p99"], keys,
+              [*SYNC_COLS, "feed_delay_p50", "feed_delay_p99"], hour, ["topology", "scenario"])
+    if base_dir:
+        base = rows(base_dir / "summary.csv")
+        print(f"\n{base_dir / 'summary.csv'}: topologies, hybrid clock, no skew\n")
+        keys = [("mesh", "loss0", "hlc", "0")] + [("star", s, "hlc", "0") for s in ("loss0", "loss50", "hubdown")]
+        table(["topology", "scenario", "clock", "skew_ms", "settled", *SYNC_COLS], keys, SYNC_COLS, base,
+              ["topology", "scenario", "clock", "skew_ms"])
+        print(f"\n{base_dir / 'summary.csv'}: clocks, mesh\n")
+        cols = ["ingest_lost", "ingest_regress", "merge_regress", "wrong_final", "prop_p95", "stale_p99", "rejected"]
+        keys = [(c, str(k), "loss0") for c in ("hlc", "wall") for k in REAL_SKEWS]
+        keys += [(c, "4000", s) for s in ("loss20", "partition") for c in ("hlc", "wall")]
+        table(["clock", "skew_ms", "scenario", "settled", *cols], keys, cols, base, ["clock", "skew_ms", "scenario"])
+    if cloud_dir:
+        both = rows(cloud_dir / "summary.csv") + [r for r in rows(sync_dir / "summary.csv") if r["topology"] == "star"]
+        print(f"\n{cloud_dir / 'summary.csv'} against the star rows of {sync_dir / 'summary.csv'}\n")
+        cols = ["settle_ms", "prop_p50", "prop_p95", "prop_p99", "catchup_merge_ms", "merged_cut", "cloud_requests",
+                "cloud_writes", "cloud_won", "cloud_writes_per_report", "commit"]
+        keys = [(t, s) for s in ("loss0", "loss20", "partition") for t in ("star", "cloud")]
+        table(["topology", "scenario", "settled", *cols], keys, cols, both, ["topology", "scenario"])
+    if live_dir:
+        live = rows(live_dir / "summary.csv")
+        print(f"\n{live_dir / 'summary.csv'}\n")
+        cols = ["aircraft", "ingest_total", "settle_ms", "prop_p50", "prop_p95", "prop_p99", "prop_unresolved",
+                "feed_delay_p50", "feed_delay_p99", "stale_p50", "stale_p99", "catchup_ms", "catchup_merge_ms",
+                "merged_cut", "ingest_regress", "merge_regress", "sensor_errors"]
+        keys = [("mesh", "loss0"), ("mesh", "partition"), ("star", "hubdown")]
+        table(["topology", "scenario", "settled", *cols], keys, cols, live, ["topology", "scenario"])
+
+
 def strip(ax, x: float, vals: list[float], color: str, label: str | None) -> None:
     """Every run as a dot, jittered across a narrow band, plus its median."""
     if not vals:
         return
     n = len(vals)
-    xs = [x + 0.18 * ((i % 9) / 8 - 0.5) for i in range(n)]
+    xs = [x + (0.3 * i / (n - 1) - 0.15 if n > 1 else 0) for i in range(n)]  # evenly across the band
     ax.scatter(xs, vals, s=14, color=color, alpha=0.45, linewidths=0, zorder=2)
     ax.scatter([x], [statistics.median(vals)], s=90, color=color, edgecolors=SURFACE, linewidths=2,
                zorder=3, label=label)
@@ -194,6 +255,7 @@ def real_latency(hour_dir: Path, base_dir: Path, out: Path) -> None:
                 and r["clock"] == "hlc" and int(r["skew_ms"]) == 0 and r["prop_p95"] != ""]
         strip(ax, x, vals, BLUE if topo == "mesh" else ORANGE, None)
     ax.set_yscale("log")
+    plain_log(ax)
     ax.set_xticks(range(len(conds)), [c[0] for c in conds])
     ax.set_ylabel("p95 propagation latency (s, log scale)")
     ax.set_title(REAL_LATENCY_TITLE)
@@ -235,6 +297,7 @@ def cloud_relay(cloud_dir: Path, sync_dir: Path, out: Path) -> None:
         strip(ax, x - 0.15, hub, ORANGE, "in-memory hub" if x == 0 else None)
         strip(ax, x + 0.15, rel, AQUA, "cloud peer on DynamoDB" if x == 0 else None)
     ax.set_yscale("log")
+    plain_log(ax)
     ax.set_xticks(range(len(scens)), [s[1] for s in scens])
     ax.set_ylabel("p95 propagation latency (s, log scale)")
     ax.set_title(CLOUD_TITLE)
@@ -257,6 +320,7 @@ def main() -> None:
     ap.add_argument("--real-hour", type=Path)
     ap.add_argument("--real-base", type=Path)
     ap.add_argument("--cloud", type=Path)
+    ap.add_argument("--live", type=Path)
     ap.add_argument("--out", type=Path, default=Path("docs"))
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
@@ -273,6 +337,7 @@ def main() -> None:
         wrote.append("cloud-relay.png")
     print(f"wrote {', '.join(wrote)} in {args.out}\n")
     tables(args.sync, args.clock)
+    real_tables(args.real_hour, args.real_base, args.cloud, args.live, args.sync)
 
 
 if __name__ == "__main__":
