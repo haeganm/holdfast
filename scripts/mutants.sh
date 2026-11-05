@@ -59,6 +59,7 @@ mutants=(
   "harness: the sweep's own results mark the checkout dirty|harness/run.py|s/, \"--\", \"\.\", \":\(exclude\)results\"//"
   "harness: a deployed peer's table always counts as matching|harness/run.py|s/matches = final == \{run\.extra\[\"cloud_hash\"\]\[\"hash\"\]\}/matches = True/"
   "cloud: a failed write still answers success|cloud/peer.go|s/\tif err != nil \{\n\t\t\/\/ Nothing is lost/\tif false {\n\t\t\/\/ Nothing is lost/"
+  "harness: a cloud peer left in the shell leaks into every run|harness/run.py|s/\"CLOUD_PEER\": \"\", \"CLOUD_TOKEN\": \"\",/\"CLOUD_UNUSED\": \"\",/"
   "adsb: backoff can undercut the interval|internal/adsb/adsb.go|s/return max\(min\(2\*last, maxBackoff\), every, retryAfter\)/return min(max(2*last, retryAfter), maxBackoff)/"
   "harness: full recovery ignores its floor|harness/run.py|s/if v > worst_floor:\n            start = None/if False:\n            start = None/"
   "harness: full recovery accepts a single dip|harness/run.py|s/if t - start >= SUSTAIN_MS:/if t - start >= 0:/"

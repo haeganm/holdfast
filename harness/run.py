@@ -346,9 +346,10 @@ def peers(node: str, topology: str) -> str:
     return ",".join(f"http://{IP[n]}:8080" for n in others)
 
 
-def execute(run: Run, keep_obs: bool = False) -> None:
+def run_env(run: Run, t0: int) -> dict:
+    """compose's variables for one run. The cloud ones are always set, so a
+    CLOUD_PEER left in the caller's shell can't turn a mesh run into a cloud run."""
     cfg = run.cfg
-    t0 = now_ms() + LEAD_MS
     env = os.environ | {
         "T0": str(t0),
         "CLOCK": cfg.clock,
@@ -357,6 +358,7 @@ def execute(run: Run, keep_obs: bool = False) -> None:
         "TRACE_MS": str(run.duration_ms),
         "C_OFFSET": str(cfg.skew_ms),
         **{f"{n.upper()}_PEERS": peers(n, cfg.topology) for n in EDGES},
+        "CLOUD_PEER": "", "CLOUD_TOKEN": "",
     }
     if cfg.topology == "cloud":
         # A fresh token, as Lambda requires, which the edges send through
@@ -364,7 +366,14 @@ def execute(run: Run, keep_obs: bool = False) -> None:
         env |= {"CLOUD_PEER": f"http://{IP['cloud']}:8080", "CLOUD_TOKEN": secrets.token_hex(32)}
     if cfg.topology == "aws":
         env |= {"CLOUD_PEER": os.environ["HOLDFAST_CLOUD_URL"].rstrip("/"), "CLOUD_TOKEN": os.environ["HOLDFAST_CLOUD_TOKEN"]}
-    auth = {"cloud": env.get("CLOUD_TOKEN", "")}
+    return env
+
+
+def execute(run: Run, keep_obs: bool = False) -> None:
+    cfg = run.cfg
+    t0 = now_ms() + LEAD_MS
+    env = run_env(run, t0)
+    auth = {"cloud": env["CLOUD_TOKEN"]}
     services = list(run.nodes)
     teardown(env, keep_obs)
     try:

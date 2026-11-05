@@ -4,9 +4,11 @@ formula can't quietly produce plausible numbers.
     python -m unittest discover -s harness
 """
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import run as h
 
@@ -264,6 +266,17 @@ class AwsTest(unittest.TestCase):
         self.assertIs(self.run_with_hashes(["x", "x", "x"], "x"), True)
         self.assertIs(self.run_with_hashes(["x", "x", "x"], "y"), False)
         self.assertIs(self.run_with_hashes(["x", "x", "z"], "x"), False)
+
+
+class RunEnvTest(unittest.TestCase):
+    def test_a_cloud_peer_left_in_the_shell_cannot_reach_other_runs(self):
+        run = lambda topology: h.Run(h.Config("t", topology, "loss0", "hlc", 0), 0, 1000, 0)  # noqa: E731
+        with mock.patch.dict(os.environ, {"CLOUD_PEER": "https://elsewhere.example", "CLOUD_TOKEN": "x" * 64}):
+            mesh, cloud = h.run_env(run("mesh"), 0), h.run_env(run("cloud"), 0)
+        self.assertEqual((mesh["CLOUD_PEER"], mesh["CLOUD_TOKEN"]), ("", ""))
+        self.assertEqual(cloud["CLOUD_PEER"], f"http://{h.IP['cloud']}:8080")
+        self.assertEqual(len(cloud["CLOUD_TOKEN"]), 64)
+        self.assertNotEqual(cloud["CLOUD_TOKEN"], "x" * 64)
 
 
 class CommitLabelTest(unittest.TestCase):
