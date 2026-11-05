@@ -52,7 +52,13 @@ class AnalyzeTest(unittest.TestCase):
             return h.analyze(self.exp, Path(d) / "polls.csv")
 
     def test_propagation_counts_only_nodes_that_did_not_make_the_report(self):
-        self.assertEqual(h.propagation(self.exp), [300, 600])
+        self.assertEqual(h.propagation(self.exp), ([300, 600], 2, 0))
+
+    def test_a_report_that_never_arrives_is_counted_not_dropped(self):
+        for p in self.exp.polls[3:]:
+            p.states["c"] = dict(p.states["c"], tracks={})  # c never gets a's report
+        self.assertEqual(h.propagation(self.exp), ([300], 2, 1))
+        self.assertEqual(self.analyze()["prop_unresolved"], 0.5)
 
     def test_summary(self):
         row = self.analyze()
@@ -144,12 +150,16 @@ class LagTest(unittest.TestCase):
             poll(4000, a=state(4000, mine(r1)), b=state(4000, held(r1)), c=state(4000, held(r1))),
             # a has made a newer report; b is 4 s behind it, c has caught up
             poll(8000, a=state(8000, mine(r2)), b=state(8000, held(r1)), c=state(8000, held(r2))),
+            # after ingest stops: b 6 s behind, which lag_worst must not count
+            poll(10_400, a=state(10_400, mine(T0 + 10_000)), b=state(10_400, held(T0 + 4000)),
+                 c=state(10_400, held(T0 + 10_000))),
         ]
         with tempfile.TemporaryDirectory() as d:
             row = h.analyze(exp, Path(d) / "polls.csv")
             with (Path(d) / "polls.csv").open() as f:
                 b_last = [line for line in f if line.startswith("8000,b,")][0].strip().split(",")
         self.assertEqual(row["lag_p95"], 4000)  # six samples, one of them 4000
+        self.assertEqual(row["lag_worst"], 4000)
         self.assertAlmostEqual(row["behind_frac"], round((0 / 3 + 1 / 3) / 2, 4))
         self.assertEqual(b_last[-2:], ["4000", "1"])  # b's worst lag, and one aircraft over 2 s behind
 

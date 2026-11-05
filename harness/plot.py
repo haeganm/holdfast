@@ -62,7 +62,7 @@ def timeline(sync_dir: Path, out: Path) -> None:
     ax.text(end, 0.97, " ingest stops", transform=ax.get_xaxis_transform(), va="top", color=INK2)
     ax.set_xlabel("seconds since the trace started")
     ax.set_ylabel("p95 lag behind the freshest report (s)")
-    ax.set_title("Per-node lag during a 20 s partition of node c (mesh, one run)")
+    ax.set_title("Lag grows 1 s per second of the cut and clears 1.2 s after the heal")
     ax.legend(loc="upper left")
     fig.tight_layout()
     fig.savefig(out / "partition-timeline.png", dpi=150)
@@ -93,7 +93,7 @@ def sync_latency(sync_dir: Path, out: Path) -> None:
     ax.set_yscale("log")
     ax.set_xticks(range(len(SCENARIOS)), [LABELS[s] for s in SCENARIOS])
     ax.set_ylabel("p95 propagation latency (s, log scale)")
-    ax.set_title("Report propagation latency by network condition")
+    ax.set_title("A second hop costs 2.4x; 50% loss costs the mesh 26x")
     ax.legend(title="median, range over repeats", loc="upper left", alignment="left")
     fig.tight_layout()
     fig.savefig(out / "sync-latency.png", dpi=150)
@@ -123,9 +123,9 @@ def clock_skew(clock_dir: Path, out: Path) -> None:
                     zorder=3)
     ax.set_xticks(range(len(SKEWS)), [f"{s:+d} ms" if s else "0" for s in SKEWS])
     ax.set_xlabel("node c's clock error (reports arrive once a second)")
-    ax.set_ylabel("merges that kept the older report, per run")
-    ax.set_title("Merges that kept the older report, by clock and skew")
-    ax.legend(title="median, range over repeats", loc="upper left", alignment="left")
+    ax.set_ylabel("reports that lost to an older one, per run")
+    ax.set_title("Wall clock: ~313 lost writes a run at 2 s skew. HLC: none at any skew")
+    ax.legend(title="median, range over repeats", loc="center", alignment="left")
     fig.tight_layout()
     fig.savefig(out / "clock-skew.png", dpi=150)
     plt.close(fig)
@@ -138,7 +138,8 @@ def cell(vals: list[str], n: int) -> str:
     if not got:
         return "never"
     m, a, b = spread(got)
-    fmt = (lambda x: f"{x:g}") if any(x != int(x) for x in got) else (lambda x: f"{int(x)}")
+    def fmt(x: float) -> str:
+        return f"{x:g}"  # a median of an even count can end in .5; show it, don't truncate
     out = fmt(m) if a == b else f"{fmt(m)} ({fmt(a)}-{fmt(b)})"
     return out if len(got) == n else f"{out}, {n - len(got)}/{n} never"
 
@@ -157,7 +158,7 @@ def table(header: list[str], keys: list[tuple[str, ...]], cols: list[str],
 
 def tables(sync_dir: Path, clock_dir: Path) -> None:
     sync = rows(sync_dir / "summary.csv")
-    cols = ["settle_ms", "prop_p50", "prop_p95", "prop_p99", "recover_p95_ms", "recover_all_ms",
+    cols = ["settle_ms", "prop_p50", "prop_p95", "prop_p99", "prop_unresolved", "recover_p95_ms", "recover_all_ms",
             "merged_cut", "sync_err_rate", "wire_bytes_per_obs", "ingest_lost", "rejected", "aborted"]
     keys = [(t, s) for t in ("mesh", "star") for s in SCENARIOS]
     print(f"{sync_dir / 'summary.csv'}\n")

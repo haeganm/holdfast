@@ -9,3 +9,12 @@ __pycache__/
 /holdfast.exe
 /gentrace
 /gentrace.exe
+!/results/partial-sweep-sync-9679d12/
+/results/partial-sweep-sync-9679d12/*
+!/results/partial-sweep-sync-9679d12/summary.csv
+!/results/aborted-sweep-sync-1009/
+/results/aborted-sweep-sync-1009/*
+!/results/aborted-sweep-sync-1009/summary.csv
+!/results/aborted2-sweep-sync/
+/results/aborted2-sweep-sync/*
+!/results/aborted2-sweep-sync/summary.csv

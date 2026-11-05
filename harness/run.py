@@ -22,8 +22,12 @@ Definitions used throughout:
                        for it; if the node holds nothing, minus the first time any
                        node reported it. Reports land on a 1 s grid per aircraft,
                        so lag moves in whole seconds.
-    prop               propagation latency: for each report and each edge node that did
-                       not make it, time until the node holds it or something fresher
+    prop               propagation latency: for each report made after the warm-up and
+                       each edge node that did not make it, time until the node holds it
+                       or something fresher. Percentiles are over delivered pairs only.
+    prop_unresolved    fraction of those (report, node) pairs never delivered by the last
+                       poll; they are not in the percentiles, so a high value means the
+                       percentiles flatter the run. Added after the predictions.
     settle_ms          after ingest stops, time until every node's hash is equal
     recover_p95_ms     prediction 5 as registered: after a partition heals, time until
                        the p95 lag over all edge nodes and aircraft is back at or below
@@ -36,7 +40,11 @@ Definitions used throughout:
                        upper bounds.
     wire_bytes_per_obs bytes sent on every node's mesh link during ingest (headers and
                        retransmits included, read from the interface counters) divided
-                       by reports ingested
+                       by reports ingested. netem drops packets before the interface
+                       counts them, so under loss this is what got onto the wire, not
+                       what was attempted.
+    lag_worst          the worst lag of any edge node on any aircraft at any poll during
+                       ingest (after the warm-up); added after the predictions
     merged_cut         received tracks the edge nodes merged while a cut was fully in
                        force (one client timeout after the cut, until the heal); added
                        after the predictions
@@ -304,11 +312,12 @@ def execute(run: Run) -> None:
         compose(env, "down", "-t", "2", "--remove-orphans")
 
 
-def propagation(run: Run) -> list[float]:
+def propagation(run: Run) -> tuple[list[float], int, int]:
     """Propagation latency, sorted: for every report made during the ingest
     window and every edge node that did not make that report itself, the time
     from the report until the node first holds it or something fresher.
-    Resolution is the poll interval."""
+    Resolution is the poll interval. Also returns how many such pairs there
+    were and how many were never delivered."""
     reports: dict[str, set[int]] = {}
     made: dict[tuple[str, str], set[int]] = {}
     for p in run.polls:
@@ -322,6 +331,7 @@ def propagation(run: Run) -> list[float]:
     lo, hi = t0_abs + WARMUP_MS, t0_abs + run.duration_ms
     pending = {(n, ac): sorted(r for r in rs if lo <= r <= hi and r not in made.get((n, ac), set()))
                for ac, rs in reports.items() for n in EDGES}
+    pairs = sum(len(q) for q in pending.values())
     out: list[float] = []
     for p in run.polls:
         for n in EDGES:
@@ -331,7 +341,7 @@ def propagation(run: Run) -> list[float]:
                 while q and q[0] <= tr["at"]:
                     out.append(now - q.pop(0))
     out.sort()
-    return out
+    return out, pairs, sum(len(q) for q in pending.values())
 
 
 def before_cut(series: list[tuple[int, float]], cut: int) -> list[float]:
@@ -403,6 +413,7 @@ def analyze(run: Run, polls_path: Path) -> dict:
     p95_by_poll: list[tuple[int, float]] = []  # pooled over edge nodes and aircraft
     worst_by_poll: list[tuple[int, float]] = []  # the worst edge node's worst aircraft
     settled_at = None
+    lag_worst = None
     polls_path.parent.mkdir(parents=True, exist_ok=True)
     with polls_path.open("w", newline="") as f:
         w = csv.writer(f, lineterminator="\n")
@@ -440,11 +451,12 @@ def analyze(run: Run, polls_path: Path) -> dict:
                 if WARMUP_MS <= p.t <= run.duration_ms:
                     samples.extend(poll_lags)
                     behind_fracs.append(behind / len(poll_lags))
+                    lag_worst = worst if lag_worst is None else max(lag_worst, worst)
             if settled_at is None and p.t >= run.duration_ms and len({p.states[n]["hash"] for n in run.nodes}) == 1:
                 settled_at = p.t
 
     samples.sort()
-    prop = propagation(run)
+    prop, prop_pairs, prop_lost = propagation(run)
     final = run.polls[-1].states if run.polls else {}
     first = run.polls[0].states if run.polls else {}
     # Counters from the first poll on, so sync attempts made while the other
@@ -484,7 +496,10 @@ def analyze(run: Run, polls_path: Path) -> dict:
         "heal_exec_ms": run.events.get("heal_exec", ""),
         "merged_cut": merged_during_cut(run),  # added after the predictions
         "prop_p50": blank_pct(prop, 50), "prop_p95": blank_pct(prop, 95), "prop_p99": blank_pct(prop, 99),
-        "prop_n": len(prop), "lag_p95": blank_pct(samples, 95),
+        "prop_n": len(prop),
+        "prop_unresolved": round(prop_lost / prop_pairs, 4) if prop_pairs else "",  # added after the predictions
+        "lag_p95": blank_pct(samples, 95),
+        "lag_worst": "" if lag_worst is None else lag_worst,  # added after the predictions
         "behind_frac": round(sum(behind_fracs) / len(behind_fracs), 4) if behind_fracs else "",
         "aircraft": len(own_by), "overlap_frac": round(sum(1 for v in own_by.values() if v >= 2) / len(own_by), 3) if own_by else "",
         "ingest_total": ingest, "ingest_lost": totals.get("ingest_lost", 0),

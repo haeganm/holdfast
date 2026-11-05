@@ -36,6 +36,8 @@ mutants=(
   "harness: behind is never counted|harness/run.py|s/behind \+= sum\(1 for x in lags if x > BEHIND_MS\)/behind += 0/"
   "harness: propagation counts a node's own reports|harness/run.py|s/ and r not in made\.get\(\(n, ac\), set\(\)\)//"
   "harness: merges during the cut count from the first poll|harness/run.py|s/inside = \[p for p in run\.polls if lo <= p\.t < heal\]/inside = run.polls/"
+  "harness: worst lag keeps the best poll|harness/run.py|s/else max\(lag_worst, worst\)/else min(lag_worst, worst)/"
+  "harness: undelivered reports are dropped silently|harness/run.py|s/return out, pairs, sum\(len\(q\) for q in pending\.values\(\)\)/return out, pairs, 0/"
   "harness: settle ignores unequal hashes|harness/run.py|s/and len\(\{p\.states\[n\]\[\"hash\"\] for n in run\.nodes\}\) == 1/and True/"
 )
 
