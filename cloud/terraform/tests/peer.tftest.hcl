@@ -59,6 +59,10 @@ run "table_is_on_demand_with_ttl" {
     condition     = one(aws_dynamodb_table.tracks.ttl).attribute_name == "expires" && one(aws_dynamodb_table.tracks.ttl).enabled
     error_message = "TTL on expires"
   }
+  assert {
+    condition     = one(aws_dynamodb_table.tracks.on_demand_throughput).max_read_request_units == 300 && one(aws_dynamodb_table.tracks.on_demand_throughput).max_write_request_units == 200
+    error_message = "the table's on-demand rate must be capped, 300 reads and 200 writes a second"
+  }
 }
 
 run "iam_policy_is_exactly_least_privilege" {

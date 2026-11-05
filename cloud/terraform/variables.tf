@@ -50,6 +50,18 @@ variable "rate" {
   default = 10
 }
 
+# Per second. Three live edges need about 100 reads (each request scans the
+# table, 1 unit per 4 KB) and bursts of up to about 100 writes after a poll.
+variable "max_read_units" {
+  type    = number
+  default = 300
+}
+
+variable "max_write_units" {
+  type    = number
+  default = 200
+}
+
 variable "bootstrap_path" {
   type        = string
   default     = "../build/bootstrap"

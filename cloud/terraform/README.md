@@ -29,6 +29,15 @@ Needs AWS credentials. `api_url` is the relay address for the edge nodes. `peer_
 
 ## Deploy, measure, destroy
 
+What keeps the bill small, since an AWS budget only emails, hours after the spend:
+
+- The stack lives for one sitting: apply, measure for 10 minutes, destroy, then check that nothing tagged `project = holdfast` is left (`aws resourcegroupstaggingapi get-resources --tag-filters Key=project,Values=holdfast` should list nothing).
+- Rate ceilings: the stage throttle (`rate`, `burst`) caps requests, and `max_read_units` / `max_write_units` cap the table. A request without the token gets a 401 before anything touches the table.
+- A separate account budget, made once and kept after the stack is gone, emails at $1, $2.50 and $4 of actual spend and at $5 forecast. The stack's own budget goes away with the stack.
+- Credentials are short-lived Identity Center sessions (1 hour), never access keys; `aws sso logout` at the end clears the cached ones.
+
+Prices as AWS lists them for us-east-1 (checked 2026-11-05): HTTP API requests $1.00 per million; Lambda requests $0.20 per million, and 400,000 GB-seconds a month in the free tier; DynamoDB on demand $0.125 per million reads and $0.625 per million writes, where a strongly consistent Scan costs 1 read unit per 4 KB of items evaluated and a failed conditional write still costs its unit; CloudWatch Logs $0.50 per GB ingested, 5 GB a month free. A 10-minute run of three edges makes about 2,400 requests, so it comes to a few cents.
+
 Credentials come from IAM Identity Center (`aws configure sso --profile holdfast`, then `aws sso login --profile holdfast`). Terraform runs from the image `check.sh` pins, so nothing else is installed. From the repo root, in Git Bash:
 
     export AWS_PROFILE=holdfast TF_IMAGE=$(sed -n 's/^TF_IMAGE="\(.*\)"/\1/p' check.sh)

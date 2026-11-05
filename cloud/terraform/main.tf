@@ -20,6 +20,13 @@ resource "aws_dynamodb_table" "tracks" {
     enabled        = true
   }
 
+  # A hard ceiling on the on-demand rate, so a runaway client is throttled
+  # instead of billed. Only token holders reach the table at all.
+  on_demand_throughput {
+    max_read_request_units  = var.max_read_units
+    max_write_request_units = var.max_write_units
+  }
+
   # Demo: no point-in-time recovery, and the table can be destroyed freely.
   point_in_time_recovery {
     enabled = false
