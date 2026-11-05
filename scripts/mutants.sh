@@ -8,6 +8,9 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 PY="${PY:-${PYTHON:-python3}}"  # check.sh exports PY
+# Every mutant was checked to die at the simulation's default of 200
+# schedules; the gate's larger run is for finding new bugs, not for these.
+export HOLDFAST_SIM_RUNS=200
 command -v "$PY" >/dev/null 2>&1 || PY=python
 mutants=(
   "Put keeps the smaller track|internal/crdt/track.go|s/if ok && Compare\(cur, t\) >= 0 \{/if ok \&\& Compare(cur, t) <= 0 {/"
@@ -19,11 +22,15 @@ mutants=(
   "HLC Now reuses a stamp in the same millisecond|internal/hlc/hlc.go|s/\} else \{\n\t\tc\.last\.Logical\+\+\n\t\}\n\tc\.rollOver\(\)/}\n\tc.rollOver()/"
   "node merges before advancing its clock|internal/node/node.go|s/n\.clock\.Update\(high\)/_ = high/"
   "node counts a cut-off body as a rejection|internal/node/node.go|s/if body\.err != nil \{/if false {/"
+  "node never holds its reports after a start|internal/node/node.go|s/if cfg\.StartupHold > 0 && !cfg\.Wall \{/if false {/"
+  "node drops what it held when the hold ends|internal/node/node.go|s/n\.stamp\(id, held\[id\]\)/_ = id/"
+  "node keeps the first held report, not the latest|internal/node/node.go|s/obs\.ObservedAtMS >= prev\.ObservedAtMS/obs.ObservedAtMS < prev.ObservedAtMS/"
+  "node advances its clock before validating|internal/node/node.go|s/\tif err := n\.validate\(msgTS, tracks\); err != nil \{/\tn.clock.Update(msgTS)\n\tif err := n.validate(msgTS, tracks); err != nil {/"
   "node accepts stamps from the far future|internal/node/node.go|s/if ts\.WallMS > limit \{/if false {/"
   "node accepts a logical part that wraps the clock|internal/node/node.go|s/if ts\.Logical > hlc\.MaxLogical \{/if false {/"
   "node has no per-message track cap|internal/node/node.go|s/if len\(tracks\) > maxEntries \{/if false {/"
   "node advances its clock only to the message stamp|internal/node/node.go|s/\t\t\thigh = t\.TS\n/\t\t\tcontinue\n/"
-  "Ingest stamps before taking the lock|internal/node/node.go|s/n\.mu\.Lock\(\)\n\tdefer n\.mu\.Unlock\(\)\n\twon, prev := n\.tracks\.Put\(id, crdt\.Track\{Obs: obs, TS: n\.clock\.Now\(\), Origin: n\.id\}\)/ts := n.clock.Now()\n\tn.mu.Lock()\n\tdefer n.mu.Unlock()\n\twon, prev := n.tracks.Put(id, crdt.Track{Obs: obs, TS: ts, Origin: n.id})/"
+  "Ingest stamps without the lock|internal/node/node.go|s/\tn\.mu\.Lock\(\)\n\tdefer n\.mu\.Unlock\(\)\n\tn\.c\.ingestTotal\.Add\(1\)/\tn.c.ingestTotal.Add(1)/"
   "merge_regress is never counted|internal/node/node.go|s/\t\t\tn\.c\.mergeRegress\.Add\(1\)\n//"
   "checksum ignores speed and heading|internal/crdt/track.go|s/o\.AltFt, o\.GSKt, o\.HeadingDeg\}/o.AltFt}/"
   "harness: full recovery ignores its floor|harness/run.py|s/if v > worst_floor:\n            start = None/if False:\n            start = None/"

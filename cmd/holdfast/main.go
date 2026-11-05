@@ -39,6 +39,7 @@ func run() error {
 		clock    = flag.String("clock", "hlc", "hlc, or wall for the wall-clock baseline")
 		offsetMS = flag.Int("clock-offset-ms", 0, "skew this node's physical clock (experiments)")
 		maxDrift = flag.Duration("max-drift", 5*time.Second, "reject remote stamps further ahead than this")
+		hold     = flag.Duration("startup-hold", 0, "hold own reports this long after start, so a restart can't reuse old stamps; 0 means the max drift, negative none")
 		trace    = flag.String("trace", "", "trace to replay; empty means no local ingest")
 		coverage = flag.String("coverage", "", "lat,lon,radius_km of the reports this node receives")
 		t0       = flag.Int64("t0", 0, "unix ms at which the trace starts; 0 means 2 s from now")
@@ -66,6 +67,7 @@ func run() error {
 		Wall:         *clock == "wall",
 		ClockOffset:  time.Duration(*offsetMS) * time.Millisecond,
 		MaxDrift:     *maxDrift,
+		StartupHold:  *hold,
 		Client:       &http.Client{Timeout: *timeout},
 		Logger:       log,
 	})

@@ -11,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -78,6 +77,7 @@ func startCluster(t *testing.T, wall bool, specs ...spec) map[string]*testNode {
 			SyncInterval: 20 * time.Millisecond,
 			Wall:         wall,
 			ClockOffset:  s.offset,
+			StartupHold:  -1, // fresh nodes, clocks within the test's offsets
 			Client:       &http.Client{Timeout: time.Second, Transport: cutTransport{tn, http.DefaultTransport}},
 		})
 		if err != nil {
@@ -176,7 +176,7 @@ func TestSlowClockFreshWriteWinsOnlyUnderHLC(t *testing.T) {
 
 func newLoneNode(t *testing.T) (*Node, *httptest.Server) {
 	t.Helper()
-	n, err := New(Config{ID: "a"})
+	n, err := New(Config{ID: "a", StartupHold: -1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,53 +277,38 @@ func TestClockAdvancesPastTrackStampsNotJustTheMessageStamp(t *testing.T) {
 	}
 }
 
-// Ingest must stamp and store under the same lock that receive holds while
-// it advances the clock and merges. This forces a receive to arrive exactly
-// between an Ingest's stamp and its store: with the lock held, the receive
-// waits and the local write wins; stamped outside the lock, the receive
-// slips in and the local write loses.
+// A local write must take its stamp while holding the node lock that receive
+// holds while it advances the clock and merges. Otherwise a merge can land
+// between the stamp and the store, and the fresh write loses to it. The clock
+// is the hook: it runs at the exact moment a stamp is taken, so it can check
+// who holds the lock. Both paths that stamp are covered: a plain write, and
+// the reports a node held during its startup hold.
 func TestIngestStampsUnderTheLock(t *testing.T) {
-	var armed atomic.Bool
-	var n *Node
-	done := make(chan struct{})
-	ahead := time.Now().Add(time.Second).UnixMilli()
-	clock := func() time.Time {
-		if armed.CompareAndSwap(true, false) {
-			go func() {
-				defer close(done)
-				err := n.receive(hlc.Timestamp{WallMS: ahead}, map[crdt.ICAO]crdt.Track{
-					"AAAAA1": {Obs: obs(1), TS: hlc.Timestamp{WallMS: ahead}, Origin: "b"},
-				})
-				if err != nil {
-					t.Error(err)
-				}
-			}()
-			// Hold the stamp open until someone owns n.mu. If Ingest already
-			// holds it (correct), that is immediately true and the receive
-			// queues behind Ingest. If not, wait for the receive to take it,
-			// so it is guaranteed to merge before Ingest stores.
-			deadline := time.Now().Add(5 * time.Second)
-			for n.mu.TryLock() {
+	for _, hold := range []time.Duration{-1, time.Second} {
+		var n *Node
+		var unlocked atomic.Int32
+		now := time.UnixMilli(simStartMS)
+		clock := func() time.Time {
+			if n != nil && n.mu.TryLock() {
 				n.mu.Unlock()
-				if time.Now().After(deadline) {
-					t.Error("the receive never took the node lock")
-					break
-				}
-				runtime.Gosched()
+				unlocked.Add(1)
 			}
+			return now
 		}
-		return time.Now()
-	}
-	var err error
-	n, err = New(Config{ID: "a", Now: clock})
-	if err != nil {
-		t.Fatal(err)
-	}
-	armed.Store(true)
-	n.Ingest("AAAAA1", obs(2))
-	<-done
-	if got := n.Counters().IngestLost; got != 0 {
-		t.Fatalf("ingest_lost = %d: a merge landed between the stamp and the store", got)
+		var err error
+		n, err = New(Config{ID: "a", Now: clock, StartupHold: hold})
+		if err != nil {
+			t.Fatal(err)
+		}
+		n.Ingest("AAAAA1", obs(1))
+		now = now.Add(2 * time.Second)
+		n.Ingest("AAAAA2", obs(2))
+		if n.tracks.Len() != 2 {
+			t.Fatalf("hold %v: %d tracks stored, want 2", hold, n.tracks.Len())
+		}
+		if got := unlocked.Load(); got != 0 {
+			t.Fatalf("hold %v: %d clock readings taken without the node lock", hold, got)
+		}
 	}
 }
 
@@ -443,3 +428,60 @@ func TestCutOffBodyIsAbortedNotRejected(t *testing.T) {
 		})
 	}
 }
+
+// During the startup hold a node keeps its reports, the latest per aircraft
+// whatever order they arrive in, and stamps them as soon as the hold ends,
+// above every stamp that existed when it started.
+func TestStartupHoldKeepsTheLatestReportAndStampsItAfterTheHold(t *testing.T) {
+	now := time.UnixMilli(simStartMS)
+	n, err := New(Config{ID: "a", Now: func() time.Time { return now }, StartupHold: 5 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n.Ingest("AAAAA1", obs(simStartMS+200))
+	n.Ingest("AAAAA1", obs(simStartMS+100)) // late arrival of an older report
+	n.Ingest("BBBBB1", obs(simStartMS+300))
+	if n.tracks.Len() != 0 {
+		t.Fatal("a report entered the replica during the hold")
+	}
+	now = now.Add(5 * time.Second)
+	n.Ingest("CCCCC1", obs(simStartMS+5000)) // the first report after the hold releases the rest
+	snap := n.tracks.Snapshot()
+	if got := snap["AAAAA1"].Obs.ObservedAtMS; got != simStartMS+200 {
+		t.Fatalf("AAAAA1 holds the report from %d, want the latest, from %d", got, simStartMS+200)
+	}
+	if len(snap) != 3 {
+		t.Fatalf("%d aircraft after the hold, want 3", len(snap))
+	}
+	for id, tr := range snap {
+		if tr.TS.WallMS < simStartMS+5000 {
+			t.Errorf("%s stamped at %v, inside the hold", id, tr.TS)
+		}
+	}
+	if c := n.Counters(); c.IngestHeld != 3 || c.IngestTotal != 4 {
+		t.Fatalf("ingest_held=%d ingest_total=%d, want 3 and 4", c.IngestHeld, c.IngestTotal)
+	}
+}
+
+// The hold also ends on a sync tick, so a node that goes quiet after starting
+// doesn't sit on its reports.
+func TestStartupHoldEndsOnASyncTick(t *testing.T) {
+	now := time.UnixMilli(simStartMS)
+	n, err := New(Config{ID: "a", Now: func() time.Time { return now }, StartupHold: time.Second,
+		Client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("no peer")
+		})}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n.Ingest("AAAAA1", obs(simStartMS))
+	now = now.Add(time.Second)
+	_ = n.syncOnce(context.Background(), "http://b")
+	if n.tracks.Len() != 1 {
+		t.Fatal("the held report was not stamped on the first tick after the hold")
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

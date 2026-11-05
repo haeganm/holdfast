@@ -15,10 +15,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"math"
 	"math/rand/v2"
 	"net/http"
 	"regexp"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -63,6 +65,19 @@ type Config struct {
 	// system to stay under MaxDrift. Default 5s.
 	MaxDrift time.Duration
 
+	// StartupHold is how long a newly started node holds its own reports
+	// before stamping them. A restarted node's clock knows nothing of the
+	// stamps its previous run issued, and can be behind them; any stamp in
+	// the system is at most the clock spread ahead of this node's physical
+	// clock, and that spread is assumed to stay under MaxDrift. So after
+	// holding for MaxDrift, every stamp this node issues sorts after every
+	// stamp that existed when it started, its own old ones included. Held
+	// reports are kept, the latest per aircraft, and stamped when the hold
+	// ends. Default MaxDrift; negative for none, which is safe only when no
+	// stamp can be ahead of this node's clock. The wall-clock baseline never
+	// holds: it makes no ordering promise to keep.
+	StartupHold time.Duration
+
 	Client *http.Client     // default: 2s timeout
 	Now    func() time.Time // true time; default time.Now
 	Logger *slog.Logger     // default: discard
@@ -72,6 +87,7 @@ type Config struct {
 type Counters struct {
 	IngestTotal  int64 `json:"ingest_total"`
 	IngestLost   int64 `json:"ingest_lost"`   // a local observation lost to an older one already stored
+	IngestHeld   int64 `json:"ingest_held"`   // a local observation arrived during the startup hold
 	MergeApplied int64 `json:"merge_applied"` // a received track won its merge
 	MergeStale   int64 `json:"merge_stale"`   // a received track lost or was a redelivery
 	MergeRegress int64 `json:"merge_regress"` // a received track won but was older than what it replaced
@@ -84,7 +100,7 @@ type Counters struct {
 }
 
 type counters struct {
-	ingestTotal, ingestLost                atomic.Int64
+	ingestTotal, ingestLost, ingestHeld    atomic.Int64
 	mergeApplied, mergeStale, mergeRegress atomic.Int64
 	syncOK, syncErr, rejected, aborted     atomic.Int64
 	bytesOut, bytesIn                      atomic.Int64
@@ -110,6 +126,11 @@ type Node struct {
 	// the HLC always sorts after everything this node has already seen.
 	mu  sync.Mutex
 	own map[crdt.ICAO]int64 // latest ObservedAtMS this node ingested itself, per aircraft
+
+	// held is non-nil during the startup hold, which lasts until the
+	// physical clock reads holdUntilMS. Both are guarded by mu.
+	held        map[crdt.ICAO]crdt.Observation
+	holdUntilMS int64
 }
 
 func New(cfg Config) (*Node, error) {
@@ -121,6 +142,9 @@ func New(cfg Config) (*Node, error) {
 	}
 	if cfg.MaxDrift == 0 {
 		cfg.MaxDrift = 5 * time.Second
+	}
+	if cfg.StartupHold == 0 {
+		cfg.StartupHold = cfg.MaxDrift
 	}
 	if cfg.SyncInterval < 0 || cfg.MaxDrift < 0 {
 		return nil, errors.New("sync interval and max drift must be positive")
@@ -136,7 +160,7 @@ func New(cfg Config) (*Node, error) {
 	}
 	trueNow, offset := cfg.Now, cfg.ClockOffset
 	physNow := func() time.Time { return trueNow().Add(offset) }
-	return &Node{
+	n := &Node{
 		id:       cfg.ID,
 		peers:    cfg.Peers,
 		interval: cfg.SyncInterval,
@@ -148,20 +172,56 @@ func New(cfg Config) (*Node, error) {
 		client:   cfg.Client,
 		log:      cfg.Logger.With("node", cfg.ID),
 		own:      map[crdt.ICAO]int64{},
-	}, nil
+	}
+	if cfg.StartupHold > 0 && !cfg.Wall {
+		n.held = map[crdt.ICAO]crdt.Observation{}
+		n.holdUntilMS = physNow().Add(cfg.StartupHold).UnixMilli()
+	}
+	return n, nil
 }
 
-// Ingest stamps a local observation and merges it into the replica.
+// Ingest stamps a local observation and merges it into the replica, or keeps
+// it until the startup hold ends.
 func (n *Node) Ingest(id crdt.ICAO, obs crdt.Observation) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	won, prev := n.tracks.Put(id, crdt.Track{Obs: obs, TS: n.clock.Now(), Origin: n.id})
 	n.c.ingestTotal.Add(1)
-	if !won && prev.Obs.ObservedAtMS < obs.ObservedAtMS {
-		n.c.ingestLost.Add(1)
-	}
 	if obs.ObservedAtMS > n.own[id] {
 		n.own[id] = obs.ObservedAtMS
+	}
+	if n.holding() {
+		if prev, ok := n.held[id]; !ok || obs.ObservedAtMS >= prev.ObservedAtMS {
+			n.held[id] = obs
+		}
+		n.c.ingestHeld.Add(1)
+		return
+	}
+	n.stamp(id, obs)
+}
+
+// holding reports whether the startup hold is still on, and stamps what it
+// held once it is over. Callers hold mu.
+func (n *Node) holding() bool {
+	if n.held == nil {
+		return false
+	}
+	if n.physNow().UnixMilli() < n.holdUntilMS {
+		return true
+	}
+	held := n.held
+	n.held = nil
+	for _, id := range slices.Sorted(maps.Keys(held)) {
+		n.stamp(id, held[id])
+	}
+	return false
+}
+
+// stamp writes a local observation with a fresh stamp. Callers hold mu, so no
+// merge can land between taking the stamp and storing it.
+func (n *Node) stamp(id crdt.ICAO, obs crdt.Observation) {
+	won, prev := n.tracks.Put(id, crdt.Track{Obs: obs, TS: n.clock.Now(), Origin: n.id})
+	if !won && prev.Obs.ObservedAtMS < obs.ObservedAtMS {
+		n.c.ingestLost.Add(1)
 	}
 }
 
@@ -326,6 +386,9 @@ type pushRequest struct {
 // syncOnce is one anti-entropy round: send my digest, merge what the peer
 // says I'm missing, then send what the peer says it's missing.
 func (n *Node) syncOnce(ctx context.Context, peer string) error {
+	n.mu.Lock()
+	n.holding() // the hold ends on a tick even if no new report arrives
+	n.mu.Unlock()
 	req := syncRequest{From: n.id, HLC: n.clock.Now(), Digest: n.tracks.Digest()}
 	var resp syncResponse
 	if err := n.post(ctx, peer+"/sync", req, &resp); err != nil {
@@ -518,7 +581,7 @@ func (n *Node) handleState(w http.ResponseWriter, _ *http.Request) { writeJSON(w
 func (n *Node) Counters() Counters {
 	c := &n.c
 	return Counters{
-		IngestTotal: c.ingestTotal.Load(), IngestLost: c.ingestLost.Load(),
+		IngestTotal: c.ingestTotal.Load(), IngestLost: c.ingestLost.Load(), IngestHeld: c.ingestHeld.Load(),
 		MergeApplied: c.mergeApplied.Load(), MergeStale: c.mergeStale.Load(), MergeRegress: c.mergeRegress.Load(),
 		SyncOK: c.syncOK.Load(), SyncErr: c.syncErr.Load(), Rejected: c.rejected.Load(), Aborted: c.aborted.Load(),
 		BytesOut: c.bytesOut.Load(), BytesIn: c.bytesIn.Load(),
@@ -540,6 +603,7 @@ func (n *Node) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 		{"holdfast_hlc_logical", "gauge", "Logical part of the latest clock stamp.", "", int64(last.Logical)},
 		{"holdfast_ingest_total", "counter", "Local observations ingested.", "", c.IngestTotal},
 		{"holdfast_ingest_lost_total", "counter", "Local observations that lost to an older stored one.", "", c.IngestLost},
+		{"holdfast_ingest_held_total", "counter", "Local observations that arrived during the startup hold.", "", c.IngestHeld},
 		{"holdfast_merge_applied_total", "counter", "Received tracks that won their merge.", "", c.MergeApplied},
 		{"holdfast_merge_stale_total", "counter", "Received tracks that lost or were redeliveries.", "", c.MergeStale},
 		{"holdfast_merge_regress_total", "counter", "Received tracks that won but were older than what they replaced.", "", c.MergeRegress},
