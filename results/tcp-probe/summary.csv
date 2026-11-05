@@ -1,0 +1,8 @@
+i,spec,scenario,sync_timeout,settled,settle_ms,prop_p50,prop_p95,prop_unresolved,sync_err_rate,commit,errors,window_ActiveOpens,window_OutSegs,window_RetransSegs,window_TCPTimeouts,window_TCPSynRetrans,window_sync_ok,window_sync_err
+0,loss0:2s,loss0,2s,True,135,213,627,0.0,0.0,ac9c857,,0,11666,0,0,0,260,0
+1,loss50:2s,loss50,2s,False,,4920,14708,0.1167,0.7687,ac9c857,,56,10176,602,420,174,12,77
+2,loss50:10s,loss50,10s,True,9952,5941,16514,0.0,0.4717,ac9c857,,17,9549,300,209,65,14,17
+3,loss50:2s,loss50,2s,False,,4366,19251,0.2715,0.7655,ac9c857,,60,10139,581,391,189,11,78
+4,loss50:10s,loss50,10s,False,,5669,18257,0.2165,0.4107,ac9c857,,17,9587,319,219,50,12,17
+5,loss50:2s,loss50,2s,True,9765,4308,18613,0.0,0.7365,ac9c857,,60,10211,623,456,204,12,77
+6,loss50:10s,loss50,10s,True,9257,11539,29559,0.0,0.4727,ac9c857,,20,9359,272,194,57,5,21

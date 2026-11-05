@@ -58,7 +58,8 @@ What the data says:
 
 - **A second hop costs 2.4x with no loss.** Star p95 is 1589 ms against mesh's 649 ms. The absolute gap widens under loss, since every report crosses two lossy links (the ratio peaks at 5.6x under bursty loss).
 - **Bursty loss hurts more than the same average loss spread evenly.** At 20% average loss, Gilbert-Elliott bursts raised p95 1.4x in the mesh and 1.9x in the star over i.i.d. loss.
-- **50% loss is where the design breaks.** About 79% of sync rounds fail, mesh p95 is 26x the no-loss value, and only 1 of 9 runs settled within 10 s. Those percentiles still flatter it: 7.9% of report deliveries in the mesh (median, up to 22.7%) and 35.6% in the star (up to 58.0%) never happened at all. The likely cause, not yet verified: a 2 s client timeout against TCP's 1 s initial retransmit timeout. A round that loses its SYN twice cannot finish in time, and each timeout drops the connection, so the next round pays for a new handshake. Wire bytes per report fall to 27% of the no-loss value in the mesh and 16% in the star, partly because netem's drops are never counted and partly because failed rounds stop sending.
+- **50% loss is where the design breaks.** About 79% of sync rounds fail, mesh p95 is 26x the no-loss value, and only 1 of 9 runs settled within 10 s. Those percentiles still flatter it: 7.9% of report deliveries in the mesh (median, up to 22.7%) and 35.6% in the star (up to 58.0%) never happened at all. Wire bytes per report fall to 27% of the no-loss value in the mesh and 16% in the star, partly because netem's drops are never counted and partly because failed rounds stop sending.
+- **At 50% loss the limit is TCP itself, not the client timeout.** A diagnostic added after the predictions ([`harness/tcp_probe.py`](harness/tcp_probe.py), [`results/tcp-probe/summary.csv`](results/tcp-probe/summary.csv), commit ac9c857, three runs per setting) reran the mesh with the client timeout at 2 s and at 10 s, and read the kernel's TCP counters inside each node over 43 s of ingest. With no loss: 260 rounds completed, 0 failed, 0 new connections, 0 retransmits, because one keep-alive connection per peer carries everything. At 50% loss with the 2 s timeout: 11-12 completed, 77-78 failed, 56-60 new connections and 174-204 SYN retransmits, since a timed-out round drops its connection and the next round has to start with a fresh handshake. Raising the timeout to 10 s cut the failures to 17-21 and the new connections to 17-20, but it did not get more through: 5-14 rounds completed and propagation p95 was 16.5-29.6 s, against 14.7-19.3 s at 2 s. Across the 6 peer links that is about one completed round per link every 20 s at best. The timeout decides how failure shows up, not how much gets through.
 - **During a partition the rest of the mesh keeps working.** While c is cut off, a and b keep merging each other's reports (468 merged tracks, median). When the star's hub is cut, the edges merge nothing at all for the whole cut: 0 in every run.
 
 ## Results: clock skew
@@ -108,7 +109,7 @@ What the data says:
 ## Design decisions
 
 - **HLC as a struct of wall ms plus a 32-bit logical counter**, rather than packed into one uint64. Readable in JSON and in tests. It costs a few bytes per stamp, and packing stays possible later. The logical part is capped at 2^20: past that the clock moves to the next millisecond instead of wrapping, and a node rejects any stamp over the cap.
-- **Stdlib HTTP and JSON, digest anti-entropy**, rather than gossip (memberlist) or a binary encoding. No dependencies, and every message can be read with curl. The cost shows at 50% loss: TCP and a whole-digest round trip are a poor fit for a link that drops half its packets.
+- **Stdlib HTTP and JSON, digest anti-entropy**, rather than gossip (memberlist) or a binary encoding. No dependencies, and every message can be read with curl. The cost shows at 50% loss: a request and response over TCP rarely finish when half the packets drop, whatever the timeout (measured above).
 - **A synthetic trace**, rather than recorded ADS-B. Ground truth has to be exact for propagation and lag to mean anything, and committing community-collected traffic data brings share-alike licensing into the repo. A recorded-traffic adapter can emit the same JSONL later.
 
 ## Caveats
@@ -126,6 +127,7 @@ What the data says:
 python -I harness/run.py --family sync --repeats 5         # about 70 s per run
 python -I harness/run.py --family clock --repeats 5
 python -I harness/run.py --reanalyze results/sweep-sync    # recompute summary.csv from raw/, no Docker
+python -I harness/tcp_probe.py --out results/tcp-probe loss0:2s loss50:2s loss50:10s   # kernel TCP counters mid-run
 pip install -r harness/requirements.txt                    # matplotlib, for plot.py only
 python harness/plot.py --sync results/sweep-sync --clock results/sweep-clock --out docs
 ```
