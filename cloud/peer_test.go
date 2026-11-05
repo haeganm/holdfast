@@ -301,6 +301,57 @@ func TestEdgesConvergeThroughTheCloud(t *testing.T) {
 	}
 }
 
+// failPut fails every PutItem for one aircraft while on is set, at the
+// transport, as a store outage or exhausted throttling retries would.
+type failPut struct {
+	next interface {
+		Do(*http.Request) (*http.Response, error)
+	}
+	icao string
+	on   *atomic.Bool
+}
+
+func (f failPut) Do(r *http.Request) (*http.Response, error) {
+	if f.on.Load() && r.Header.Get("X-Amz-Target") == "DynamoDB_20120810.PutItem" {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			return nil, err
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		if bytes.Contains(body, []byte(`"icao":{"S":"`+f.icao+`"}`)) {
+			return nil, fmt.Errorf("injected: the store is unavailable for %s", f.icao)
+		}
+	}
+	return f.next.Do(r)
+}
+
+func TestAStoreFailureMidRequestLosesNothing(t *testing.T) {
+	p := newPeer(t)
+	var failing atomic.Bool
+	failing.Store(true)
+	opts := p.db.Options()
+	opts.HTTPClient = failPut{next: opts.HTTPClient, icao: "AAAAA1", on: &failing}
+	opts.Retryer = aws.NopRetryer{} // the SDK's retries are its own business; this is what happens after them
+	broken := &peer{db: dynamodb.New(opts), table: p.table, token: token, ttl: p.ttl, now: p.now, log: p.log}
+
+	tracks := map[crdt.ICAO]crdt.Track{"AAAAA1": track(1, "b"), "AAAAA2": track(2, "b"), "AAAAA3": track(3, "b")}
+	rec := call(t, broken, http.MethodPost, "/push", map[string]any{
+		"from": "b", "hlc": hlc.Timestamp{WallMS: time.Now().UnixMilli()}, "tracks": tracks})
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("a request whose write failed answered %d, want 503 so the edge's next round resends", rec.Code)
+	}
+	got := stored(t, p)
+	if _, ok := got["AAAAA1"]; ok || len(got) != 2 {
+		t.Fatalf("after one failed write the table holds %d tracks, want the other 2", len(got))
+	}
+
+	failing.Store(false)
+	push(t, broken, tracks) // the edge's next round sends what is still missing
+	if got := stored(t, p); crdt.HashOf(got) != crdt.HashOf(tracks) {
+		t.Fatal("once the store came back, the table does not hold what the edge sent")
+	}
+}
+
 type bearer struct{ token string }
 
 func (b bearer) RoundTrip(r *http.Request) (*http.Response, error) {
