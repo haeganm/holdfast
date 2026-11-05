@@ -15,7 +15,7 @@ FROM debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1de
 # iproute2 for tc netem, so the harness can impair the relay's mesh link
 # like any node's; the peer itself runs unprivileged.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends iproute2 \
+ && apt-get install -y --no-install-recommends iproute2 ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/cloud /usr/local/bin/cloud
 COPY harness/netem.sh /usr/local/bin/netem

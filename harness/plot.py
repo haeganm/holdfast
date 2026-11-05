@@ -170,17 +170,108 @@ def tables(sync_dir: Path, clock_dir: Path) -> None:
     table(["clock", "skew_ms", "settled", *cols], keys, cols, clock, ["clock", "skew_ms"])
 
 
+def strip(ax, x: float, vals: list[float], color: str, label: str | None) -> None:
+    """Every run as a dot, jittered across a narrow band, plus its median."""
+    if not vals:
+        return
+    n = len(vals)
+    xs = [x + 0.18 * ((i % 9) / 8 - 0.5) for i in range(n)]
+    ax.scatter(xs, vals, s=14, color=color, alpha=0.45, linewidths=0, zorder=2)
+    ax.scatter([x], [statistics.median(vals)], s=90, color=color, edgecolors=SURFACE, linewidths=2,
+               zorder=3, label=label)
+
+
+def real_latency(hour_dir: Path, base_dir: Path, out: Path) -> None:
+    """Propagation p95 on the recorded hour: one dot per window."""
+    hour, base = rows(hour_dir / "summary.csv"), rows(base_dir / "summary.csv")
+    conds = [("no loss", base, "mesh", "loss0"), ("20% loss", hour, "mesh", "loss20"),
+             ("50% loss", hour, "mesh", "loss50"), ("c cut 20 s", hour, "mesh", "partition"),
+             ("star, no loss", base, "star", "loss0"), ("star, 50% loss", base, "star", "loss50"),
+             ("star, hub cut", base, "star", "hubdown")]
+    fig, ax = plt.subplots(figsize=(9, 4.4))
+    for x, (_, data, topo, sc) in enumerate(conds):
+        vals = [float(r["prop_p95"]) / 1000 for r in data if r["topology"] == topo and r["scenario"] == sc
+                and r["clock"] == "hlc" and int(r["skew_ms"]) == 0 and r["prop_p95"] != ""]
+        strip(ax, x, vals, BLUE if topo == "mesh" else ORANGE, None)
+    ax.set_yscale("log")
+    ax.set_xticks(range(len(conds)), [c[0] for c in conds])
+    ax.set_ylabel("p95 propagation latency (s, log scale)")
+    ax.set_title(REAL_LATENCY_TITLE)
+    fig.tight_layout()
+    fig.savefig(out / "real-latency.png", dpi=150)
+    plt.close(fig)
+
+
+REAL_SKEWS = [-4000, -2000, 2000, 4000]
+
+
+def real_clock(base_dir: Path, out: Path) -> None:
+    """Lost local writes per window on the recorded hour, by clock and skew."""
+    data = rows(base_dir / "summary.csv")
+    fig, ax = plt.subplots(figsize=(8, 4))
+    for clock, color, dx, label in (("hlc", BLUE, -0.12, "hybrid logical clock"), ("wall", ORANGE, 0.12, "wall clock")):
+        for x, sk in enumerate(REAL_SKEWS):
+            vals = [int(r["ingest_lost"]) for r in data if r["clock"] == clock and int(r["skew_ms"]) == sk
+                    and r["scenario"] == "loss0"]
+            strip(ax, x + dx, vals, color, label if x == 0 else None)
+    ax.set_xticks(range(len(REAL_SKEWS)), [f"{s:+d} ms" for s in REAL_SKEWS])
+    ax.set_xlabel("node c's clock error")
+    ax.set_ylabel("local writes lost, per window")
+    ax.set_title(REAL_CLOCK_TITLE)
+    ax.legend(loc="upper left")
+    fig.tight_layout()
+    fig.savefig(out / "real-clock.png", dpi=150)
+    plt.close(fig)
+
+
+def cloud_relay(cloud_dir: Path, sync_dir: Path, out: Path) -> None:
+    """The cloud peer against the in-memory hub, same trace and scenarios."""
+    cloud, sync = rows(cloud_dir / "summary.csv"), rows(sync_dir / "summary.csv")
+    scens = [("loss0", "no loss"), ("loss20", "20% loss"), ("partition", "c cut 20 s")]
+    fig, ax = plt.subplots(figsize=(8, 4))
+    for x, (sc, _) in enumerate(scens):
+        hub = [float(r["prop_p95"]) / 1000 for r in sync if r["topology"] == "star" and r["scenario"] == sc]
+        rel = [float(r["prop_p95"]) / 1000 for r in cloud if r["scenario"] == sc]
+        strip(ax, x - 0.15, hub, ORANGE, "in-memory hub" if x == 0 else None)
+        strip(ax, x + 0.15, rel, AQUA, "cloud peer on DynamoDB" if x == 0 else None)
+    ax.set_yscale("log")
+    ax.set_xticks(range(len(scens)), [s[1] for s in scens])
+    ax.set_ylabel("p95 propagation latency (s, log scale)")
+    ax.set_title(CLOUD_TITLE)
+    ax.legend(loc="upper left")
+    fig.tight_layout()
+    fig.savefig(out / "cloud-relay.png", dpi=150)
+    plt.close(fig)
+
+
+# Titles state what the data shows; set them after looking at the figures.
+REAL_LATENCY_TITLE = "Propagation on the recorded hour, one dot per window"
+REAL_CLOCK_TITLE = "Lost local writes on the recorded hour, by clock and skew"
+CLOUD_TITLE = "The cloud relay against the in-memory hub"
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--sync", type=Path, required=True)
     ap.add_argument("--clock", type=Path, required=True)
+    ap.add_argument("--real-hour", type=Path)
+    ap.add_argument("--real-base", type=Path)
+    ap.add_argument("--cloud", type=Path)
     ap.add_argument("--out", type=Path, default=Path("docs"))
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     timeline(args.sync, args.out)
     sync_latency(args.sync, args.out)
     clock_skew(args.clock, args.out)
-    print(f"wrote {args.out}/partition-timeline.png, sync-latency.png, clock-skew.png\n")
+    wrote = ["partition-timeline.png", "sync-latency.png", "clock-skew.png"]
+    if args.real_hour and args.real_base:
+        real_latency(args.real_hour, args.real_base, args.out)
+        real_clock(args.real_base, args.out)
+        wrote += ["real-latency.png", "real-clock.png"]
+    if args.cloud:
+        cloud_relay(args.cloud, args.sync, args.out)
+        wrote.append("cloud-relay.png")
+    print(f"wrote {', '.join(wrote)} in {args.out}\n")
     tables(args.sync, args.clock)
 
 

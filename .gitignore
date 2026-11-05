@@ -21,3 +21,12 @@ __pycache__/
 !/results/tcp-probe/
 /results/tcp-probe/*
 !/results/tcp-probe/summary.csv
+!/results/live/
+!/results/cloud/
+!/results/real-base/
+!/results/real-hour/
+/results/*/polls/
+/results/real-*/raw/
+!/results/aborted-live-nocerts/
+/results/aborted-live-nocerts/*
+!/results/aborted-live-nocerts/summary.csv
