@@ -208,6 +208,60 @@ class CatchupTest(unittest.TestCase):
         self.assertEqual(self.run_with(polls), "")
 
 
+class CatchupMergeTest(unittest.TestCase):
+    def held(self, w, origin, at, own=0):
+        tr = {"ts": {"w": w}, "origin": origin, "at": T0 + at}
+        if own:
+            tr["own"] = T0 + own
+        return {"XXXXXX": tr}
+
+    def test_a_later_write_of_an_older_observation_does_not_hold_it_up(self):
+        # a reported an observation made at 7500; b then wrote one made at 7498,
+        # later, so last-writer-wins keeps b's. Once every edge holds b's
+        # nothing from before the heal is missing, though nothing observed at
+        # 7500 is anywhere, so catchup_ms never completes.
+        polls = [
+            poll(7900, a=state(7900, self.held(7600, "a", 7500, 7500)), b=state(7900, self.held(7700, "b", 7498, 7498)),
+                 c=state(7900, self.held(7600, "a", 7500))),
+            poll(8000, a=state(8000, self.held(7600, "a", 7500, 7500)), b=state(8000, self.held(7700, "b", 7498, 7498)),
+                 c=state(8000, self.held(7600, "a", 7500))),
+            poll(8400, a=state(8400, self.held(7700, "b", 7498, 7500)), b=state(8400, self.held(7700, "b", 7498, 7498)),
+                 c=state(8400, self.held(7700, "b", 7498))),
+        ]
+        run = h.Run(h.Config("test", "mesh", "partition", "hlc", 0), 0, duration_ms=20_000, settle_ms_window=0)
+        run.events = {"cut": 4000, "cut_exec": 100, "heal": 8000}
+        run.polls = polls
+        self.assertEqual(h.catchup(run), "")
+        self.assertEqual(h.catchup_merge(run), 400)
+
+
+class LiveReceiptTest(unittest.TestCase):
+    def test_live_reports_count_from_the_first_poll_that_shows_them(self):
+        run = h.Run(h.Config("live", "mesh", "loss0", "hlc", 0, "live"), 0, duration_ms=10_000, settle_ms_window=0)
+        mine = {"AAAAAA": {"ts": {}, "origin": "a", "at": T0 + 400, "own": T0 + 400}}  # observed at 400
+        run.polls = [
+            poll(1000, a=state(1000, {}), b=state(1000, {}), c=state(1000, {})),
+            poll(1100, a=state(1100, mine), b=state(1100, {}), c=state(1100, {})),
+            poll(1200, a=state(1200, mine), b=state(1200, {}), c=state(1200, {})),
+        ]
+        self.assertEqual(h.receipts(run, T0), ({("AAAAAA", T0 + 400): T0 + 1100}, [700]))
+        synthetic = h.Run(h.Config("test", "mesh", "loss0", "hlc", 0), 0, duration_ms=10_000, settle_ms_window=0)
+        synthetic.polls = run.polls
+        self.assertEqual(h.receipts(synthetic, T0), ({}, []))
+
+
+class CommitLabelTest(unittest.TestCase):
+    def test_only_source_changes_make_a_checkout_dirty(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            h.sh("git", "-C", d, "init", "-q")
+            (root / "results" / "sweep").mkdir(parents=True)
+            (root / "results" / "sweep" / "summary.csv").write_text("run_id\n")
+            self.assertFalse(h.dirty(root), "a sweep's own results marked the checkout dirty")
+            (root / "new.go").write_text("package x\n")
+            self.assertTrue(h.dirty(root), "an untracked source file went unnoticed")
+
+
 class RecoveryP95Test(unittest.TestCase):
     BEFORE = [(3000, 1000), (4000, 2000)]
 

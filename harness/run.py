@@ -1,6 +1,6 @@
 """Run holdfast experiments in Docker and write the measurements.
 
-    python harness/run.py --smoke                 # two short runs; exits 1 unless both converge
+    python harness/run.py --smoke                 # three short runs; exits 1 unless all converge
     python harness/run.py --family sync --repeats 5
     python harness/run.py --family clock --repeats 5
     python harness/run.py --reanalyze results/<dir>   # recompute summary.csv from raw/
@@ -29,6 +29,12 @@ Definitions used throughout:
     prop               propagation latency: for each report made after the warm-up and
                        each edge node that did not make it, time until the node holds it
                        or something fresher. Percentiles are over delivered pairs only.
+                       On the synthetic trace a report counts from its observation, which
+                       is also when its node received it. On a recorded trace it counts
+                       from its first receipt by any node, from the trace; live, from the
+                       first poll that shows a node holding it (added after the live runs).
+    feed_delay_p50/p99 recorded or live: observation to first receipt, the feed's own
+                       delay, which no sync design can shorten
     prop_unresolved    fraction of those (report, node) pairs never delivered by the last
                        poll; they are not in the percentiles, so a high value means the
                        percentiles flatter the run. Added after the predictions.
@@ -64,6 +70,12 @@ Definitions used throughout:
                        had made by the heal. It has no floor taken from before the cut,
                        so irregular reports can't make it look instant. Added after the
                        predictions.
+    catchup_merge_ms   catchup_ms in the merge's own order: time until every edge node
+                       holds, for every aircraft, a value at least as high in merge order
+                       as the highest any edge held at the heal. Last-writer-wins can keep
+                       a later write of an older observation, which catchup_ms waits on
+                       until a fresher report comes; this asks only that nothing from
+                       before the heal is missing. Added after predictions-2.
     wire_bytes_per_useful  wire bytes during ingest divided by merges that won (updates
                        that changed some node's picture). Added after the predictions.
     merged_cut         received tracks the edge nodes merged while a cut was fully in
@@ -83,6 +95,7 @@ import json
 import math
 import os
 import re
+import secrets
 import subprocess
 import sys
 import threading
@@ -183,7 +196,9 @@ def window_ms(cfg: Config, repeat: int) -> int:
     return 0
 
 
-SMOKE = [Config("smoke", "mesh", "loss0", "hlc", 0), Config("smoke", "mesh", "partition", "hlc", 0)]
+# A clean run, a partition that has to heal, and the cloud relay with its token.
+SMOKE = [Config("smoke", "mesh", "loss0", "hlc", 0), Config("smoke", "mesh", "partition", "hlc", 0),
+         Config("smoke", "cloud", "loss0", "hlc", 0)]
 
 
 def now_ms() -> int:
@@ -243,8 +258,13 @@ def netem(node: str, args: list[str]) -> str:
     return out
 
 
-def get_state(node: str) -> dict:
-    with urllib.request.urlopen(f"http://127.0.0.1:{PORT[node]}/state", timeout=2) as r:
+def authorized(url: str, token: str) -> urllib.request.Request:
+    """A GET of url, carrying the cloud peer's bearer token if there is one."""
+    return urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"} if token else {})
+
+
+def get_state(node: str, token: str = "") -> dict:
+    with urllib.request.urlopen(authorized(f"http://127.0.0.1:{PORT[node]}/state", token), timeout=2) as r:
         return json.load(r)
 
 
@@ -316,7 +336,7 @@ def load_raw(path: Path) -> Run:
 def peers(node: str, topology: str) -> str:
     if node in ("hub", "cloud"):
         return ""
-    others = {"mesh": [n for n in EDGES if n != node], "star": ["hub"], "cloud": ["cloud"]}[topology]
+    others = {"mesh": [n for n in EDGES if n != node], "star": ["hub"], "cloud": []}[topology]  # cloud: CLOUD_PEER
     return ",".join(f"http://{IP[n]}:8080" for n in others)
 
 
@@ -332,6 +352,11 @@ def execute(run: Run, keep_obs: bool = False) -> None:
         "C_OFFSET": str(cfg.skew_ms),
         **{f"{n.upper()}_PEERS": peers(n, cfg.topology) for n in EDGES},
     }
+    if cfg.topology == "cloud":
+        # A fresh token, as Lambda requires, which the edges send through
+        # -cloud-peer: every cloud run also tests the edges' side of auth.
+        env |= {"CLOUD_PEER": f"http://{IP['cloud']}:8080", "CLOUD_TOKEN": secrets.token_hex(32)}
+    auth = {"cloud": env.get("CLOUD_TOKEN", "")}
     services = list(run.nodes)
     teardown(env, keep_obs)
     try:
@@ -346,7 +371,7 @@ def execute(run: Run, keep_obs: bool = False) -> None:
             try:
                 for n in run.nodes:
                     before = now_ms()
-                    st = get_state(n)
+                    st = get_state(n, auth.get(n, ""))
                     offsets.append(st["now_ms"] - (before + now_ms()) // 2)
                 break
             except (OSError, urllib.error.URLError):
@@ -403,7 +428,7 @@ def execute(run: Run, keep_obs: bool = False) -> None:
                 th.start()
                 threads.append(th)
             try:
-                states = {n: get_state(n) for n in run.nodes}
+                states = {n: get_state(n, auth.get(n, "")) for n in run.nodes}
                 run.polls.append(Poll(states[run.nodes[0]]["now_ms"] - t0, states))
             except (OSError, urllib.error.URLError) as e:
                 run.errors.append(f"poll at {host_rel} ms: {e}")
@@ -413,7 +438,7 @@ def execute(run: Run, keep_obs: bool = False) -> None:
             th.join()
         if cfg.topology == "cloud":
             try:
-                with urllib.request.urlopen(f"http://127.0.0.1:{PORT['cloud']}/peer", timeout=5) as r:
+                with urllib.request.urlopen(authorized(f"http://127.0.0.1:{PORT['cloud']}/peer", auth["cloud"]), timeout=5) as r:
                     run.extra["peer"] = json.load(r)
             except (OSError, urllib.error.URLError) as e:
                 run.errors.append(f"cloud peer counters: {e}")
@@ -430,13 +455,15 @@ def trace_records(name: str) -> tuple[tuple[int, str, int], ...]:
 
 
 def receipts(run: Run, t0_abs: int) -> tuple[dict[tuple[str, int], int], list[int]]:
-    """For a recorded trace: when the first node received each report, keyed
+    """For a recorded trace or live: when the first node received each report, keyed
     by (aircraft, observation time), and the feed delays in the window. A
     report reaches the first node only after the feed's own delay, which no
     sync design can shorten, so on recorded traffic propagation is timed from
     that first receipt and the feed's delay is reported on its own."""
-    if run.cfg.source in ("seed1", "live"):
-        return {}, []
+    if run.cfg.source == "seed1":
+        return {}, []  # synthetic: a report is received when it is observed
+    if run.cfg.source == "live":
+        return receipts_polled(run.polls)
     return receipts_in(trace_records(run.cfg.source), run.trace_from_ms, run.duration_ms, t0_abs)
 
 
@@ -452,6 +479,20 @@ def receipts_in(records, start: int, length: int, t0_abs: int) -> tuple[dict[tup
             first[key] = min(first.get(key, got), got)
             delays.append(delay)
     return first, sorted(delays)
+
+
+def receipts_polled(polls: list[Poll]) -> tuple[dict[tuple[str, int], int], list[int]]:
+    """receipts, live, where no trace says when a report arrived: the first
+    poll that shows a node holding its own report of an observation, so up to
+    one poll interval late."""
+    first: dict[tuple[str, int], int] = {}
+    for p in polls:
+        for n in EDGES:
+            now = p.states[n]["now_ms"]
+            for ac, tr in p.states[n]["tracks"].items():
+                if own := tr.get("own", 0):
+                    first[(ac, own)] = min(first.get((ac, own), now), now)
+    return first, sorted(got - obs for (_, obs), got in first.items())
 
 
 def propagation(run: Run, receipt: dict[tuple[str, int], int] | None = None) -> tuple[list[float], int, int]:
@@ -568,10 +609,34 @@ def divergence(states: dict[str, dict]) -> float | None:
 
     def value(tracks: dict, ac: str) -> tuple | None:
         tr = tracks.get(ac)
-        return None if tr is None else (tr["ts"].get("w"), tr["ts"].get("l"), tr["origin"])
+        return None if tr is None else merge_key(tr)
 
     differ = sum(1 for ac in aircraft if len({value(t, ac) for t in held}) > 1)
     return differ / len(aircraft)
+
+
+def merge_key(tr: dict) -> tuple[int, int, str]:
+    """A held value's place in the merge's order: its stamp, then its origin."""
+    return tr["ts"].get("w", 0), tr["ts"].get("l", 0), tr["origin"]
+
+
+def catchup_merge(run: Run) -> int | str:
+    """catchup in the merge's order: ms from the heal until every edge holds,
+    for every aircraft, a value at least as high in merge order as the highest
+    any edge held at the heal. Empty if it never does."""
+    heal = run.events.get("heal")
+    before = [p for p in run.polls if p.t <= heal] if heal is not None else []
+    if not before:
+        return ""
+    due: dict[str, tuple[int, int, str]] = {}
+    for n in EDGES:
+        for ac, tr in before[-1].states[n]["tracks"].items():
+            due[ac] = max(due.get(ac, merge_key(tr)), merge_key(tr))
+    for p in run.polls:
+        if p.t >= heal and all(ac in p.states[n]["tracks"] and merge_key(p.states[n]["tracks"][ac]) >= k
+                               for n in EDGES for ac, k in due.items()):
+            return p.t - heal
+    return ""
 
 
 def catchup(run: Run) -> int | str:
@@ -705,6 +770,7 @@ def analyze(run: Run, polls_path: Path) -> dict:
         "heal_exec_ms": run.events.get("heal_exec", ""),
         "merged_cut": merged_during_cut(run),  # added after the predictions
         "catchup_ms": catchup(run),  # added after the predictions
+        "catchup_merge_ms": catchup_merge(run),  # added after predictions-2
         "diverge_mean": round(sum(diverge) / len(diverge), 4) if diverge else "",
         "diverge_max": round(max(diverge), 4) if diverge else "",
         "diverge_cut": round(sum(diverge_cut) / len(diverge_cut), 4) if diverge_cut else "",
@@ -746,12 +812,16 @@ def cloud_columns(run: Run, ingest: int) -> dict:
             "cloud_writes_per_report": round(peer["writes"] / ingest, 3) if ingest else ""}
 
 
+def dirty(root: Path) -> bool:
+    """Whether the checkout differs from its commit, the harness's own output
+    aside: a sweep's results must not mark the code it measures as changed."""
+    return bool(sh("git", "-C", str(root), "status", "--porcelain", "--", ".", ":(exclude)results").strip())
+
+
 def git_commit() -> str:
     try:
         commit = sh("git", "-C", str(ROOT), "rev-parse", "--short", "HEAD").strip()
-        if sh("git", "-C", str(ROOT), "status", "--porcelain").strip():
-            commit += "-dirty"
-        return commit
+        return commit + "-dirty" if dirty(ROOT) else commit
     except (RuntimeError, OSError):
         return "unknown"
 
@@ -808,7 +878,7 @@ def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--smoke", action="store_true", help="two short runs; exit 1 unless both converge")
+    ap.add_argument("--smoke", action="store_true", help="three short runs (clean, partition, cloud); exit 1 unless all converge")
     ap.add_argument("--family", choices=("sync", "clock", "live", "cloud", "real-hour", "real-base", "all"))
     ap.add_argument("--reanalyze", type=Path, metavar="DIR", help="recompute DIR/summary.csv from DIR/raw")
     ap.add_argument("--repeats", type=int, default=5)

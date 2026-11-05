@@ -8,6 +8,8 @@ x-node: &node
   image: holdfast:dev
   pull_policy: never
   cap_add: [NET_ADMIN]
+  environment:
+    HOLDFAST_CLOUD_TOKEN: ${CLOUD_TOKEN:-}  # sent only to -cloud-peer
   volumes:
     - ../traces:/traces:ro
   stop_grace_period: 2s
@@ -20,7 +22,7 @@ services:
     networks:
       mesh: { ipv4_address: 172.30.0.11 }
       ctl: {}
-    command: ["-id=a", "-peers=${A_PEERS}", "-clock=${CLOCK}", "-sync-timeout=${SYNC_TIMEOUT:-2s}", "-clock-offset-ms=${A_OFFSET:-0}",
+    command: ["-id=a", "-peers=${A_PEERS}", "-cloud-peer=${CLOUD_PEER:-}", "-clock=${CLOCK}", "-sync-timeout=${SYNC_TIMEOUT:-2s}", "-clock-offset-ms=${A_OFFSET:-0}",
               "${SOURCE:--trace=/traces/seed1.jsonl}", "-trace-from-ms=${TRACE_FROM_MS:-0}", "-live-interval=${LIVE_INTERVAL:-18s}", "-live-offset=0s", "-coverage=39.0,-77.0,60", "-t0=${T0}", "-trace-ms=${TRACE_MS}"]
   b:
     <<: *node
@@ -29,7 +31,7 @@ services:
     networks:
       mesh: { ipv4_address: 172.30.0.12 }
       ctl: {}
-    command: ["-id=b", "-peers=${B_PEERS}", "-clock=${CLOCK}", "-sync-timeout=${SYNC_TIMEOUT:-2s}", "-clock-offset-ms=${B_OFFSET:-0}",
+    command: ["-id=b", "-peers=${B_PEERS}", "-cloud-peer=${CLOUD_PEER:-}", "-clock=${CLOCK}", "-sync-timeout=${SYNC_TIMEOUT:-2s}", "-clock-offset-ms=${B_OFFSET:-0}",
               "${SOURCE:--trace=/traces/seed1.jsonl}", "-trace-from-ms=${TRACE_FROM_MS:-0}", "-live-interval=${LIVE_INTERVAL:-18s}", "-live-offset=6s", "-coverage=39.0,-76.2,60", "-t0=${T0}", "-trace-ms=${TRACE_MS}"]
   c:
     <<: *node
@@ -38,7 +40,7 @@ services:
     networks:
       mesh: { ipv4_address: 172.30.0.13 }
       ctl: {}
-    command: ["-id=c", "-peers=${C_PEERS}", "-clock=${CLOCK}", "-sync-timeout=${SYNC_TIMEOUT:-2s}", "-clock-offset-ms=${C_OFFSET:-0}",
+    command: ["-id=c", "-peers=${C_PEERS}", "-cloud-peer=${CLOUD_PEER:-}", "-clock=${CLOCK}", "-sync-timeout=${SYNC_TIMEOUT:-2s}", "-clock-offset-ms=${C_OFFSET:-0}",
               "${SOURCE:--trace=/traces/seed1.jsonl}", "-trace-from-ms=${TRACE_FROM_MS:-0}", "-live-interval=${LIVE_INTERVAL:-18s}", "-live-offset=12s", "-coverage=39.0,-77.8,60", "-t0=${T0}", "-trace-ms=${TRACE_MS}"]
   hub:
     <<: *node
@@ -52,7 +54,8 @@ services:
 
   # The cloud topology: the cloud peer as the star's hub, backed by DynamoDB
   # Local on its own internal network, so netem on the mesh link never
-  # touches the store. No token: nothing outside this machine can reach it.
+  # touches the store. A fresh token every run, as Lambda requires, which the
+  # edges send through -cloud-peer.
   cloud:
     image: holdfast-cloud:dev
     pull_policy: never
@@ -67,6 +70,7 @@ services:
       store: {}
     environment:
       TABLE: holdfast
+      PEER_TOKEN: ${CLOUD_TOKEN:-}
       AWS_ENDPOINT_URL_DYNAMODB: http://ddb:8000
       AWS_REGION: us-east-1
       AWS_ACCESS_KEY_ID: local

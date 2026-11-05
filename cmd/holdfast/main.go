@@ -2,6 +2,13 @@
 //
 //	holdfast -id a -peers http://b:8080,http://c:8080 \
 //	    -trace traces/seed1.jsonl -coverage 39,-77,55
+//
+// A cloud peer goes in -cloud-peer, with its token in HOLDFAST_CLOUD_TOKEN.
+// No other peer is ever sent the token:
+//
+//	HOLDFAST_CLOUD_TOKEN=... holdfast -id a \
+//	    -cloud-peer https://abc123.execute-api.us-east-1.amazonaws.com \
+//	    -live-url https://api.adsb.lol/v2/point -coverage 39,-77,60
 package main
 
 import (
@@ -10,7 +17,9 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"slices"
@@ -36,6 +45,7 @@ func run() error {
 		id       = flag.String("id", "", "node id, also the origin of its writes (required)")
 		listen   = flag.String("listen", ":8080", "listen address")
 		peers    = flag.String("peers", "", "comma-separated peer base URLs")
+		cloud    = flag.String("cloud-peer", "", "base URL of a cloud peer, which alone gets the token in HOLDFAST_CLOUD_TOKEN; https, or http to a private IP")
 		interval = flag.Duration("sync-interval", time.Second, "sync period per peer")
 		timeout  = flag.Duration("sync-timeout", 2*time.Second, "client timeout per sync request")
 		clock    = flag.String("clock", "hlc", "hlc, or wall for the wall-clock baseline")
@@ -73,6 +83,23 @@ func run() error {
 			peerList = append(peerList, strings.TrimRight(p, "/"))
 		}
 	}
+	client := &http.Client{Timeout: *timeout}
+	if *cloud != "" {
+		u, err := cloudURL(*cloud)
+		if err != nil {
+			return err
+		}
+		token := os.Getenv("HOLDFAST_CLOUD_TOKEN")
+		if token == "" {
+			return errors.New("-cloud-peer needs its token in HOLDFAST_CLOUD_TOKEN")
+		}
+		base := strings.TrimRight(*cloud, "/")
+		if slices.Contains(peerList, base) {
+			return fmt.Errorf("%s is in -peers too; give the cloud peer only in -cloud-peer", base)
+		}
+		client.Transport = bearer{next: http.DefaultTransport, scheme: u.Scheme, host: u.Host, token: token}
+		peerList = append(peerList, base)
+	}
 	n, err := node.New(node.Config{
 		ID:           *id,
 		Peers:        peerList,
@@ -82,7 +109,7 @@ func run() error {
 		MaxDrift:     *maxDrift,
 		StartupHold:  *hold,
 		TrackTTL:     *ttl,
-		Client:       &http.Client{Timeout: *timeout},
+		Client:       client,
 		Logger:       log,
 	})
 	if err != nil {
@@ -191,4 +218,36 @@ func ingestLive(ctx context.Context, n *node.Node, log *slog.Logger, circle repl
 		log.Warn("live feed", "err", err)
 	})
 	log.Info("live ingest stopped")
+}
+
+// cloudURL checks a -cloud-peer URL. The token goes with every request to it,
+// so the link must be https, unless the peer has a private IP address, as the
+// harness's local cloud peer does.
+func cloudURL(raw string) (*url.URL, error) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return nil, fmt.Errorf("-cloud-peer %q: want a base URL such as https://abc123.execute-api.us-east-1.amazonaws.com", raw)
+	}
+	ip := net.ParseIP(u.Hostname())
+	private := ip != nil && (ip.IsPrivate() || ip.IsLoopback())
+	if u.Scheme != "https" && (u.Scheme != "http" || !private) {
+		return nil, fmt.Errorf("-cloud-peer %q: the token would cross the network in the clear; use https (http only to a private IP)", raw)
+	}
+	return u, nil
+}
+
+// bearer adds the cloud peer's token to requests for that peer and no other.
+// Nothing authenticates edge peers, so a token sent to one would be anyone's.
+type bearer struct {
+	next                http.RoundTripper
+	scheme, host, token string
+}
+
+func (b bearer) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.URL.Scheme != b.scheme || r.URL.Host != b.host {
+		return b.next.RoundTrip(r)
+	}
+	r = r.Clone(r.Context()) // a RoundTripper must not change the caller's request
+	r.Header.Set("Authorization", "Bearer "+b.token)
+	return b.next.RoundTrip(r)
 }

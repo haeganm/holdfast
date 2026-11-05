@@ -52,6 +52,11 @@ mutants=(
   "cloud: only the first page is read|cloud/peer.go|s/for pages := dynamodb\.NewScanPaginator\(p\.db, in\); pages\.HasMorePages\(\); \{/for pages, first := dynamodb.NewScanPaginator(p.db, in), true; pages.HasMorePages() \&\& first; first = false {/"
   "cloud: a stored ord is trusted without checking|cloud/peer.go|s/if attr\(item, \"ord\"\) != crdt\.Ord\(t\) \{/if false \&\& attr(item, \"ord\") != crdt.Ord(t) {/"
   "cloud: a bad item can't be replaced|cloud/peer.go|s/\tswitch \{\n\tcase bad && badOrd != \"\":/\tswitch {\n\tcase false \&\& bad \&\& badOrd != \"\":/"
+  "edge: the cloud token goes to every peer|cmd/holdfast/main.go|s/if r\.URL\.Scheme != b\.scheme \|\| r\.URL\.Host != b\.host \{/if false {/"
+  "edge: the cloud token may cross the network in the clear|cmd/holdfast/main.go|s/ \&\& \(u\.Scheme != \"http\" \|\| !private\)//"
+  "harness: merge-order catch-up waits only on the lowest value|harness/run.py|s/due\[ac\] = max\(due\.get\(ac, merge_key\(tr\)\), merge_key\(tr\)\)/due[ac] = min(due.get(ac, merge_key(tr)), merge_key(tr))/"
+  "harness: live propagation counts from the observation|harness/run.py|s/return receipts_polled\(run\.polls\)/return {}, []/"
+  "harness: the sweep's own results mark the checkout dirty|harness/run.py|s/, \"--\", \"\.\", \":\(exclude\)results\"//"
   "adsb: backoff can undercut the interval|internal/adsb/adsb.go|s/return max\(min\(2\*last, maxBackoff\), every, retryAfter\)/return min(max(2*last, retryAfter), maxBackoff)/"
   "harness: full recovery ignores its floor|harness/run.py|s/if v > worst_floor:\n            start = None/if False:\n            start = None/"
   "harness: full recovery accepts a single dip|harness/run.py|s/if t - start >= SUSTAIN_MS:/if t - start >= 0:/"
@@ -94,7 +99,7 @@ copy() {
 # Every suite has to pass unmutated first. Otherwise a broken environment
 # (DynamoDB down, say) would fail every mutant's tests and read as kills.
 copy
-if ! (cd "$work/src" && go test -vet=off -count=1 ./internal/... >/dev/null 2>&1 \
+if ! (cd "$work/src" && go test -vet=off -count=1 ./internal/... ./cmd/... >/dev/null 2>&1 \
       && "$PY" -m unittest discover -s harness >/dev/null 2>&1 \
       && (cd cloud && go test -vet=off -count=1 ./... >/dev/null 2>&1)); then
   echo "mutants: the unmutated tests fail, so no kill would mean anything; fix that first"
@@ -118,6 +123,9 @@ for m in "${mutants[@]}"; do
   if [[ "$file" == *.py ]]; then
     build=("$PY" -m py_compile "$file")
     test=("$PY" -m unittest discover -s harness)
+  elif [[ "$file" == cmd/* ]]; then
+    build=(go test -vet=off -count=1 -run '^$' ./cmd/...)
+    test=(go test -vet=off -count=1 ./cmd/...)
   elif [[ "$file" == cloud/* ]]; then
     build=(bash -c 'cd cloud && go test -vet=off -count=1 -run "^$" ./...')
     test=(bash -c 'cd cloud && go test -vet=off -count=1 ./...')

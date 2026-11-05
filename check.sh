@@ -100,7 +100,7 @@ MSYS_NO_PATHCONV=1 docker run --rm -v "$HERE/cloud/terraform:/tf:ro" -v holdfast
 step "harness unit tests"
 "$PY" -m unittest discover -s harness
 
-step "harness smoke: one clean run, one partition that must heal"
+step "harness smoke: a clean run, a partition that must heal, the cloud relay with its token"
 "$PY" harness/run.py --smoke
 
 printf '\ncheck: all passed\n'
