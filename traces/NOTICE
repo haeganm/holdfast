@@ -1,0 +1,18 @@
+traces/adsb-2026-11-05.jsonl.gz contains information from adsb.lol
+(https://adsb.lol), made available under the Open Database License (ODbL)
+v1.0: https://opendatacommons.org/licenses/odbl/1-0/
+
+It was recorded on 2026-11-05 from 18:17:41 to 19:17:41 UTC with
+
+    gentrace -sensor a=39.0,-77.0,60 -sensor b=39.0,-76.2,60 -sensor c=39.0,-77.8,60 \
+        -every 9s -duration 1h -out traces/adsb-2026-11-05.jsonl.gz
+
+by polling the adsb.lol API for a 70 nm circle around 39.0,-77.0 once every
+3 s and handing each response to the next sensor in turn. 68 of 601 polls
+were refused (HTTP 429), so sensors observe less often than every 9 s. Each
+line is a position report as one sensor received it: t_ms is when, relative
+to the start of the recording, and delay_ms how long after the observation.
+
+If you redistribute this file or a database derived from it, keep it under
+the ODbL. Everything else in this repository is under the MIT license in
+LICENSE; seed1.jsonl is synthetic and covered by it.
