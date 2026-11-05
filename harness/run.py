@@ -37,6 +37,9 @@ Definitions used throughout:
     wire_bytes_per_obs bytes sent on every node's mesh link during ingest (headers and
                        retransmits included, read from the interface counters) divided
                        by reports ingested
+    merged_cut         received tracks the edge nodes merged while a cut was fully in
+                       force (one client timeout after the cut, until the heal); added
+                       after the predictions
 Only edge nodes count toward lag; the star hub is a relay and has no coverage.
 """
 
@@ -71,6 +74,7 @@ POLL_MS = 100
 BEHIND_MS = 2000  # two sync intervals
 WARMUP_MS = 3000  # ignore the first seconds while every node is still filling up
 SUSTAIN_MS = 2000  # how long recover_all_ms must hold
+CUT_GRACE_MS = 2000  # one client timeout: a sync under way at the cut can still finish this late
 
 # Static impairments applied to every node for the whole run.
 LOSS = {
@@ -376,6 +380,22 @@ def recovery_all(worst_by_poll: list[tuple[int, float]], cut: int | None, heal: 
     return "" if start is None else start - heal  # held until ingest stopped
 
 
+def merged_during_cut(run: Run) -> int | str:
+    """Received tracks the edge nodes merged while the cut was fully in force:
+    from one client timeout after the cut command returned until the heal.
+    For a hub cut, anything above 0 means edges still reached each other."""
+    cut, heal = run.events.get("cut"), run.events.get("heal")
+    if cut is None or heal is None:
+        return ""
+    lo = cut + run.events.get("cut_exec", 0) + CUT_GRACE_MS
+    inside = [p for p in run.polls if lo <= p.t < heal]
+    if len(inside) < 2:
+        return ""
+    first, last = inside[0].states, inside[-1].states
+    return sum(last[n]["counters"].get("merge_applied", 0) - first[n]["counters"].get("merge_applied", 0)
+               for n in EDGES)
+
+
 def analyze(run: Run, polls_path: Path) -> dict:
     first_seen: dict[str, int] = {}
     samples: list[float] = []
@@ -462,6 +482,7 @@ def analyze(run: Run, polls_path: Path) -> dict:
         "recover_all_ms": recovery_all(worst_by_poll, cut, heal, run.duration_ms),
         "cut_at_ms": "" if cut is None else cut, "heal_at_ms": "" if heal is None else heal,
         "heal_exec_ms": run.events.get("heal_exec", ""),
+        "merged_cut": merged_during_cut(run),  # added after the predictions
         "prop_p50": blank_pct(prop, 50), "prop_p95": blank_pct(prop, 95), "prop_p99": blank_pct(prop, 99),
         "prop_n": len(prop), "lag_p95": blank_pct(samples, 95),
         "behind_frac": round(sum(behind_fracs) / len(behind_fracs), 4) if behind_fracs else "",

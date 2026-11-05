@@ -102,6 +102,22 @@ class RecoveryAllTest(unittest.TestCase):
         self.assertEqual(h.recovery_all(self.BEFORE, cut=None, heal=8000, end=10_000), "")
 
 
+class MergedDuringCutTest(unittest.TestCase):
+    def test_counts_only_merges_while_the_cut_is_fully_in_force(self):
+        cfg = h.Config("test", "star", "hubdown", "hlc", 0)
+        run = h.Run(cfg, 0, duration_ms=20_000, settle_ms_window=0)
+        run.events = {"cut": 8000, "cut_exec": 300, "heal": 16_000}
+
+        def at(t, merged):
+            return poll(t, **{n: state(t, {}, counters={"merge_applied": merged}) for n in h.EDGES})
+
+        # 5 merges per node before the grace ends, 2 more inside, 9 more after the heal.
+        run.polls = [at(0, 0), at(9000, 5), at(10_300, 5), at(15_900, 7), at(16_000, 16)]
+        self.assertEqual(h.merged_during_cut(run), 6)
+        run.events.pop("heal")
+        self.assertEqual(h.merged_during_cut(run), "")
+
+
 class RecoveryP95Test(unittest.TestCase):
     BEFORE = [(3000, 1000), (4000, 2000)]
 

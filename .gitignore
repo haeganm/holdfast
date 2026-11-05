@@ -1,5 +1,8 @@
 /results/*
 !/results/.gitkeep
+!/results/sweep-sync/
+!/results/sweep-clock/
+/results/sweep-*/polls/
 /harness/.venv/
 __pycache__/
 /holdfast

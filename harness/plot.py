@@ -2,9 +2,10 @@
 
     python harness/plot.py --sync results/<sync run dir> --clock results/<clock run dir> --out docs
 
-Writes partition-timeline.png, sync-latency.png and clock-skew.png. Every
-point drawn is a row of summary.csv or polls/*.csv in the given directories;
-nothing is smoothed or filtered.
+Writes partition-timeline.png, sync-latency.png and clock-skew.png, and
+prints the README's results tables (median, then min-max over repeats). Every
+point drawn and every number printed is a row of summary.csv or polls/*.csv in
+the given directories; nothing is smoothed or filtered.
 """
 
 from __future__ import annotations
@@ -56,8 +57,6 @@ def timeline(sync_dir: Path, out: Path) -> None:
         pts = [(int(p["t_ms"]) / 1000, float(p["lag_p95"]) / 1000) for p in polls if p["node"] == node and p["lag_p95"]]
         xs, ys = zip(*pts)
         ax.plot(xs, ys, color=color, lw=2, drawstyle="steps-post", label=f"node {node}")
-        ax.annotate(f"node {node}", (xs[-1], ys[-1]), xytext=(4, 0), textcoords="offset points",
-                    va="center", color=INK2)
     end = float(summary["duration_ms"]) / 1000
     ax.axvline(end, color=INK2, lw=0.8, ls=":")
     ax.text(end, 0.97, " ingest stops", transform=ax.get_xaxis_transform(), va="top", color=INK2)
@@ -132,6 +131,44 @@ def clock_skew(clock_dir: Path, out: Path) -> None:
     plt.close(fig)
 
 
+def cell(vals: list[str], n: int) -> str:
+    """Median and min-max of a summary column over repeats; blank cells are
+    runs where the metric never happened, and are counted, not dropped."""
+    got = [float(v) for v in vals if v != ""]
+    if not got:
+        return "never"
+    m, a, b = spread(got)
+    fmt = (lambda x: f"{x:g}") if any(x != int(x) for x in got) else (lambda x: f"{int(x)}")
+    out = fmt(m) if a == b else f"{fmt(m)} ({fmt(a)}-{fmt(b)})"
+    return out if len(got) == n else f"{out}, {n - len(got)}/{n} never"
+
+
+def table(header: list[str], keys: list[tuple[str, ...]], cols: list[str],
+          data: list[dict], key_cols: list[str]) -> None:
+    print("| " + " | ".join(header) + " |")
+    print("|" + "---|" * len(header))
+    for k in keys:
+        rs = [r for r in data if tuple(r[c] for c in key_cols) == k]
+        if not rs:
+            continue
+        settled = sum(r["settled"] == "True" for r in rs)
+        print("| " + " | ".join([*k, f"{settled}/{len(rs)}", *(cell([r[c] for r in rs], len(rs)) for c in cols)]) + " |")
+
+
+def tables(sync_dir: Path, clock_dir: Path) -> None:
+    sync = rows(sync_dir / "summary.csv")
+    cols = ["settle_ms", "prop_p50", "prop_p95", "prop_p99", "recover_p95_ms", "recover_all_ms",
+            "merged_cut", "sync_err_rate", "wire_bytes_per_obs", "ingest_lost", "rejected", "aborted"]
+    keys = [(t, s) for t in ("mesh", "star") for s in SCENARIOS]
+    print(f"{sync_dir / 'summary.csv'}\n")
+    table(["topology", "scenario", "settled", *cols], keys, cols, sync, ["topology", "scenario"])
+    clock = rows(clock_dir / "summary.csv")
+    cols = ["ingest_lost", "merge_regress", "wrong_final", "prop_p95", "rejected", "aborted"]
+    keys = [(c, str(k)) for c in ("hlc", "wall") for k in SKEWS]
+    print(f"\n{clock_dir / 'summary.csv'}\n")
+    table(["clock", "skew_ms", "settled", *cols], keys, cols, clock, ["clock", "skew_ms"])
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--sync", type=Path, required=True)
@@ -142,7 +179,8 @@ def main() -> None:
     timeline(args.sync, args.out)
     sync_latency(args.sync, args.out)
     clock_skew(args.clock, args.out)
-    print(f"wrote {args.out}/partition-timeline.png, sync-latency.png, clock-skew.png")
+    print(f"wrote {args.out}/partition-timeline.png, sync-latency.png, clock-skew.png\n")
+    tables(args.sync, args.clock)
 
 
 if __name__ == "__main__":
