@@ -2,3 +2,6 @@
 results
 harness/.venv
 **/__pycache__
+cloud/terraform
+cloud/build
+traces/adsb-*

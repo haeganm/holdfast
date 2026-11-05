@@ -54,6 +54,11 @@ class AnalyzeTest(unittest.TestCase):
     def test_propagation_counts_only_nodes_that_did_not_make_the_report(self):
         self.assertEqual(h.propagation(self.exp), ([300, 600], 2, 0))
 
+    def test_propagation_counts_from_first_receipt_when_given(self):
+        # The report was observed at 5000 but first received at 5200.
+        receipt = {("AAAAAA", T0 + 5000): T0 + 5200}
+        self.assertEqual(h.propagation(self.exp, receipt), ([100, 400], 2, 0))
+
     def test_a_report_that_never_arrives_is_counted_not_dropped(self):
         for p in self.exp.polls[3:]:
             p.states["c"] = dict(p.states["c"], tracks={})  # c never gets a's report
@@ -263,6 +268,35 @@ class RawRoundTripTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReceiptTest(unittest.TestCase):
+    def test_first_receipt_of_each_observation_in_the_window(self):
+        records = [
+            (1000, "AAAAAA", 400),  # observed at 600, received at 1000
+            (1500, "AAAAAA", 900),  # the same observation, a second sensor 500 ms later
+            (1600, "BBBBBB", 0),
+            (900, "CCCCCC", 0),     # before the window
+            (61_000, "AAAAAA", 0),  # after it
+        ]
+        first, delays = h.receipts_in(records, 1000, 60_000, T0)
+        self.assertEqual(first, {("AAAAAA", T0 - 400): T0, ("BBBBBB", T0 + 600): T0 + 600})
+        self.assertEqual(delays, [0, 400, 900])
+
+    def test_windows_are_per_family(self):
+        cfg = lambda f: h.Config(f, "mesh", "loss0", "hlc", 0)  # noqa: E731
+        self.assertEqual(h.window_ms(cfg("real-hour"), 3), 3 * h.REAL_HOUR_S * 1000)
+        self.assertEqual(h.window_ms(cfg("real-base"), 2), 900_000)
+        self.assertEqual(h.window_ms(cfg("sync"), 4), 0)
+        last = h.window_ms(cfg("real-hour"), 59) + h.REAL_HOUR_S * 1000
+        self.assertLessEqual(last, 3_582_000, "the last real-hour window runs past the recording")
+
+    def test_cloud_columns(self):
+        run = h.Run(h.Config("cloud", "cloud", "loss0", "hlc", 0), 0, 1000, 0)
+        self.assertEqual(h.cloud_columns(run, 10)["cloud_writes"], "")
+        run.extra["peer"] = {"requests": 4, "writes": 12, "won": 11, "failed": 1}
+        cols = h.cloud_columns(run, 10)
+        self.assertEqual((cols["cloud_writes_per_report"], cols["cloud_won"], cols["cloud_failed"]), (1.2, 11, 1))
 
 
 class SourceTest(unittest.TestCase):

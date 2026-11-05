@@ -17,7 +17,7 @@ Everything is tagged `project = holdfast`. State is local.
 
 The Lambda needs a `bootstrap` binary at `../build/bootstrap` (or set `bootstrap_path`). Terraform zips it and sets mode 0755, so building on Windows is fine:
 
-    GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -tags lambda.norpc -o cloud/build/bootstrap ./path/to/lambda
+    cd cloud && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -tags lambda.norpc -trimpath -o build/bootstrap .
 
 ## Apply and destroy
 

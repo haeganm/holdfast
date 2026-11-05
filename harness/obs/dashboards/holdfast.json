@@ -5,7 +5,7 @@
     "holdfast"
   ],
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "editable": false,
   "refresh": "1s",
   "time": {
@@ -179,8 +179,8 @@
     {
       "id": 4,
       "type": "timeseries",
-      "title": "Hybrid clock ahead of true time",
-      "description": "holdfast_hlc_wall_ms minus Prometheus's clock. A node whose physical clock is slow is pulled up to the fastest peer once they talk.",
+      "title": "Latest hybrid-clock stamp minus true time",
+      "description": "holdfast_hlc_wall_ms minus Prometheus's clock. Slightly negative is normal: the stamp is from the node's last sync or report. It goes positive when a peer with a fast clock drags this node's clock forward.",
       "datasource": {
         "type": "prometheus",
         "uid": "prom"

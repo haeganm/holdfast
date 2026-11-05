@@ -5,6 +5,9 @@
     python harness/run.py --family clock --repeats 5
     python harness/run.py --reanalyze results/<dir>   # recompute summary.csv from raw/
     python harness/run.py --smoke --obs           # same, with Prometheus and Grafana watching
+    python harness/run.py --family real-hour --repeats 60   # the recorded hour, every minute of it
+    python harness/run.py --family real-base --repeats 8    # baselines on 8 windows of it
+    python harness/run.py --family cloud --repeats 5        # the cloud peer as the star's hub
 
 Each run starts fresh containers, replays the same trace on every edge node,
 impairs the mesh link with tc netem on a schedule, and polls every node's
@@ -74,10 +77,12 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+import functools
 import gzip
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -92,8 +97,10 @@ COMPOSE = ROOT / "harness" / "compose.yml"
 IMAGE = "holdfast:dev"
 COMMIT_LABEL = "holdfast.commit"
 
-IP = {"hub": "172.30.0.10", "a": "172.30.0.11", "b": "172.30.0.12", "c": "172.30.0.13"}
-PORT = {"a": 8081, "b": 8082, "c": 8083, "hub": 8084}
+IP = {"hub": "172.30.0.10", "a": "172.30.0.11", "b": "172.30.0.12", "c": "172.30.0.13", "cloud": "172.30.0.14"}
+PORT = {"a": 8081, "b": 8082, "c": 8083, "hub": 8084, "cloud": 8085}
+CLOUD_IMAGE = "holdfast-cloud:dev"
+TRACE = "adsb-2026-11-05.jsonl.gz"  # the recorded hour
 EDGES = ("a", "b", "c")
 
 POLL_MS = 100
@@ -118,8 +125,9 @@ LOSS = {
 @dataclass
 class Config:
     family: str
-    topology: str  # mesh: edges peer with each other; star: edges peer only with the hub
-    scenario: str  # a LOSS key, "partition" (cut c), or "hubdown" (cut the hub; star only)
+    topology: str  # mesh: edges peer with each other; star: edges peer only with the hub;
+    # cloud: the star with the cloud peer (on DynamoDB Local) as the hub
+    scenario: str  # a LOSS key, "partition" (cut c), or "hubdown" (cut the hub or the cloud relay)
     clock: str  # hlc or wall
     skew_ms: int  # applied to node c's physical clock
     # Where reports come from: "seed1" (the committed synthetic trace), "live"
@@ -144,7 +152,35 @@ def experiments(family: str) -> list[Config]:
     # (the feed refused faster). Never run alongside a recording.
     live = [Config("live", t, s, "hlc", 0, "live") for t, s in
             (("mesh", "loss0"), ("mesh", "partition"), ("star", "hubdown"))]
-    return {"sync": sync, "clock": clock, "live": live, "all": sync + clock}[family]
+    # The cloud relay against the registered star runs: same trace, same
+    # scenarios, only the hub replaced.
+    cloud = [Config("cloud", "cloud", s, "hlc", 0) for s in ("loss0", "loss20", "partition")]
+    # The recorded hour (predictions in docs/predictions-2.md). real-hour
+    # replays every window of it under each condition the README names;
+    # real-base runs the baselines on 8 windows spread across it.
+    real_hour = [Config("real-hour", "mesh", s, "hlc", 0, TRACE) for s in ("loss20", "loss50", "partition")]
+    real_base = ([Config("real-base", "mesh", "loss0", "hlc", 0, TRACE)]
+                 + [Config("real-base", "star", s, "hlc", 0, TRACE) for s in ("loss0", "loss50", "hubdown")]
+                 + [Config("real-base", "mesh", "loss0", c, k, TRACE) for c in ("hlc", "wall")
+                    for k in (-4000, -2000, 2000, 4000)]
+                 # +4000: the trace's handoffs from c are the ones under 4 s
+                 + [Config("real-base", "mesh", s, c, 4000, TRACE) for c in ("hlc", "wall")
+                    for s in ("loss20", "partition")])
+    return {"sync": sync, "clock": clock, "live": live, "cloud": cloud, "real-hour": real_hour,
+            "real-base": real_base, "all": sync + clock}[family]
+
+
+REAL_HOUR_S = 59  # 60 windows of 59 s cover 3540 s of the 3582 s recording
+
+
+def window_ms(cfg: Config, repeat: int) -> int:
+    """Where in the trace a run starts: the same windows for every
+    configuration of a family, so differences are not traffic differences."""
+    if cfg.family == "real-hour":
+        return repeat * REAL_HOUR_S * 1000
+    if cfg.family == "real-base":
+        return repeat * 450_000  # every 7.5 minutes
+    return 0
 
 
 SMOKE = [Config("smoke", "mesh", "loss0", "hlc", 0), Config("smoke", "mesh", "partition", "hlc", 0)]
@@ -161,7 +197,7 @@ def sh(*args: str, env: dict | None = None) -> str:
     return p.stdout
 
 
-NODES = ("a", "b", "c", "hub")
+NODES = ("a", "b", "c", "hub", "cloud", "ddb")
 OBS = ("prometheus", "grafana")
 GRAFANA = "http://127.0.0.1:3000/d/holdfast"
 LEAD_MS = 10_000  # nodes start this long before the trace, so their startup hold is over first
@@ -179,7 +215,8 @@ def source_flag(source: str) -> str:
 
 
 def compose(env: dict, *args: str) -> None:
-    sh("docker", "compose", "-f", str(COMPOSE), "--profile", "star", "--profile", "obs", *args, env=env)
+    sh("docker", "compose", "-f", str(COMPOSE), "--profile", "star", "--profile", "obs", "--profile", "cloud",
+       *args, env=env)
 
 
 def teardown(env: dict, keep_obs: bool) -> None:
@@ -242,12 +279,14 @@ class Run:
     tx: dict[str, dict[str, int]] = field(default_factory=dict)  # "start"/"end" -> node -> mesh tx bytes
     vm_offset_ms: int = 0  # VM clock minus host clock
     trace_from_ms: int = 0  # where in the trace this run's window starts
+    extra: dict = field(default_factory=dict)  # the cloud peer's own counters, from GET /peer
     commit: str = ""  # commit the node image was built from
     errors: list[str] = field(default_factory=list)
 
     @property
     def nodes(self) -> tuple[str, ...]:
-        return EDGES + (("hub",) if self.cfg.topology == "star" else ())
+        relay = {"star": ("hub",), "cloud": ("cloud",)}
+        return EDGES + relay.get(self.cfg.topology, ())
 
     @property
     def part_start(self) -> int:
@@ -275,9 +314,9 @@ def load_raw(path: Path) -> Run:
 
 
 def peers(node: str, topology: str) -> str:
-    if node == "hub":
+    if node in ("hub", "cloud"):
         return ""
-    others = [n for n in EDGES if n != node] if topology == "mesh" else ["hub"]
+    others = {"mesh": [n for n in EDGES if n != node], "star": ["hub"], "cloud": ["cloud"]}[topology]
     return ",".join(f"http://{IP[n]}:8080" for n in others)
 
 
@@ -296,7 +335,9 @@ def execute(run: Run, keep_obs: bool = False) -> None:
     services = list(run.nodes)
     teardown(env, keep_obs)
     try:
-        sh("docker", "compose", "-f", str(COMPOSE), *(["--profile", "star"] if cfg.topology == "star" else []),
+        if cfg.topology == "cloud":
+            services.append("ddb")
+        sh("docker", "compose", "-f", str(COMPOSE), "--profile", cfg.topology,
            "up", "-d", "--force-recreate", *services, env=env)
 
         # Wait until every node answers, and measure the VM clock against ours.
@@ -323,7 +364,7 @@ def execute(run: Run, keep_obs: bool = False) -> None:
             for n in run.nodes:
                 netem(n, LOSS[cfg.scenario])
 
-        target = "hub" if cfg.scenario == "hubdown" else "c"
+        target = {"star": "hub", "cloud": "cloud"}.get(cfg.topology, "hub") if cfg.scenario == "hubdown" else "c"
         schedule: list[tuple[str, int, str | None, list[str]]] = [
             ("tx:start", 0, None, ["txbytes"]),
             ("tx:end", run.duration_ms, None, ["txbytes"]),
@@ -370,16 +411,57 @@ def execute(run: Run, keep_obs: bool = False) -> None:
             time.sleep(max(0, next_poll - now_ms()) / 1000)
         for th in threads:
             th.join()
+        if cfg.topology == "cloud":
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{PORT['cloud']}/peer", timeout=5) as r:
+                    run.extra["peer"] = json.load(r)
+            except (OSError, urllib.error.URLError) as e:
+                run.errors.append(f"cloud peer counters: {e}")
     finally:
         teardown(env, keep_obs)
 
 
-def propagation(run: Run) -> tuple[list[float], int, int]:
+@functools.lru_cache(maxsize=2)
+def trace_records(name: str) -> tuple[tuple[int, str, int], ...]:
+    """(t_ms, icao, delay_ms) of every record in a recorded trace."""
+    opener = gzip.open if name.endswith(".gz") else open
+    with opener(ROOT / "traces" / name, "rt", encoding="utf-8") as f:
+        return tuple((r["t_ms"], r["icao"], r.get("delay_ms", 0)) for r in (json.loads(line) for line in f if line.strip()))
+
+
+def receipts(run: Run, t0_abs: int) -> tuple[dict[tuple[str, int], int], list[int]]:
+    """For a recorded trace: when the first node received each report, keyed
+    by (aircraft, observation time), and the feed delays in the window. A
+    report reaches the first node only after the feed's own delay, which no
+    sync design can shorten, so on recorded traffic propagation is timed from
+    that first receipt and the feed's delay is reported on its own."""
+    if run.cfg.source in ("seed1", "live"):
+        return {}, []
+    return receipts_in(trace_records(run.cfg.source), run.trace_from_ms, run.duration_ms, t0_abs)
+
+
+def receipts_in(records, start: int, length: int, t0_abs: int) -> tuple[dict[tuple[str, int], int], list[int]]:
+    """receipts, for records (t_ms, icao, delay_ms) replayed from start."""
+    lo, hi = start, start + length
+    first: dict[tuple[str, int], int] = {}
+    delays = []
+    for t, icao, delay in records:
+        if lo <= t < hi:
+            got = t0_abs + t - lo
+            key = (icao, got - delay)
+            first[key] = min(first.get(key, got), got)
+            delays.append(delay)
+    return first, sorted(delays)
+
+
+def propagation(run: Run, receipt: dict[tuple[str, int], int] | None = None) -> tuple[list[float], int, int]:
     """Propagation latency, sorted: for every report made during the ingest
     window and every edge node that did not make that report itself, the time
     from the report until the node first holds it or something fresher.
-    Resolution is the poll interval. Also returns how many such pairs there
-    were and how many were never delivered."""
+    A report counts from its observation, or from its first receipt when
+    receipt maps one. Resolution is the poll interval. Also returns how many
+    such pairs there were and how many were never delivered."""
+    receipt = receipt or {}
     reports: dict[str, set[int]] = {}
     made: dict[tuple[str, str], set[int]] = {}
     for p in run.polls:
@@ -391,7 +473,9 @@ def propagation(run: Run) -> tuple[list[float], int, int]:
                     made.setdefault((n, ac), set()).add(own)
     t0_abs = run.polls[0].states[run.nodes[0]]["now_ms"] - run.polls[0].t if run.polls else 0
     lo, hi = t0_abs + WARMUP_MS, t0_abs + run.duration_ms
-    pending = {(n, ac): sorted(r for r in rs if lo <= r <= hi and r not in made.get((n, ac), set()))
+    # (observation, when the report counts from), in observation order
+    pending = {(n, ac): sorted((r, receipt.get((ac, r), r)) for r in rs
+                               if lo <= receipt.get((ac, r), r) <= hi and r not in made.get((n, ac), set()))
                for ac, rs in reports.items() for n in EDGES}
     pairs = sum(len(q) for q in pending.values())
     out: list[float] = []
@@ -400,8 +484,8 @@ def propagation(run: Run) -> tuple[list[float], int, int]:
             now = p.states[n]["now_ms"]
             for ac, tr in p.states[n]["tracks"].items():
                 q = pending.get((n, ac))
-                while q and q[0] <= tr["at"]:
-                    out.append(now - q.pop(0))
+                while q and q[0][0] <= tr["at"]:
+                    out.append(now - q.pop(0)[1])
     out.sort()
     return out, pairs, sum(len(q) for q in pending.values())
 
@@ -574,7 +658,9 @@ def analyze(run: Run, polls_path: Path) -> dict:
 
     samples.sort()
     stale.sort()
-    prop, prop_pairs, prop_lost = propagation(run)
+    t0_abs = run.polls[0].states[run.nodes[0]]["now_ms"] - run.polls[0].t if run.polls else 0
+    receipt, feed_delays = receipts(run, t0_abs)
+    prop, prop_pairs, prop_lost = propagation(run, receipt)
     final = run.polls[-1].states if run.polls else {}
     first = run.polls[0].states if run.polls else {}
     # Counters from the first poll on, so sync attempts made while the other
@@ -643,9 +729,21 @@ def analyze(run: Run, polls_path: Path) -> dict:
         "aborted": totals.get("aborted", 0),  # cut off in flight; added after the predictions
         "wire_bytes_per_obs": wire,
         "wire_bytes_per_useful": useful,  # added after the predictions
+        "feed_delay_p50": blank_pct(feed_delays, 50), "feed_delay_p99": blank_pct(feed_delays, 99),
+        **cloud_columns(run, ingest),
         "polls": len(run.polls), "poll_ms_mean": round(sum(gaps) / len(gaps), 1) if gaps else "",
         "vm_offset_ms": run.vm_offset_ms, "commit": run.commit, "errors": " | ".join(run.errors),
     }
+
+
+def cloud_columns(run: Run, ingest: int) -> dict:
+    """The cloud peer's own counters for a run, and its writes per report."""
+    peer = run.extra.get("peer")
+    if not peer:
+        return {"cloud_requests": "", "cloud_writes": "", "cloud_won": "", "cloud_failed": "", "cloud_writes_per_report": ""}
+    return {"cloud_requests": peer["requests"], "cloud_writes": peer["writes"], "cloud_won": peer["won"],
+            "cloud_failed": peer["failed"],
+            "cloud_writes_per_report": round(peer["writes"] / ingest, 3) if ingest else ""}
 
 
 def git_commit() -> str:
@@ -711,7 +809,7 @@ def main() -> int:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--smoke", action="store_true", help="two short runs; exit 1 unless both converge")
-    ap.add_argument("--family", choices=("sync", "clock", "live", "all"))
+    ap.add_argument("--family", choices=("sync", "clock", "live", "cloud", "real-hour", "real-base", "all"))
     ap.add_argument("--reanalyze", type=Path, metavar="DIR", help="recompute DIR/summary.csv from DIR/raw")
     ap.add_argument("--repeats", type=int, default=5)
     ap.add_argument("--duration", type=int, help="seconds of ingest (default 50, smoke 20)")
@@ -722,6 +820,7 @@ def main() -> int:
     ap.add_argument("--skip-build", action="store_true", help="reuse holdfast:dev if it was built from this commit")
     ap.add_argument("--obs", action="store_true",
                     help=f"run Prometheus and Grafana alongside and leave them up afterwards ({GRAFANA})")
+    ap.add_argument("--only", metavar="REGEX", help="run only the family's configurations whose run id matches")
     ap.add_argument("--resume", action="store_true",
                     help="keep runs whose raw file already exists under --out instead of rerunning them")
     args = ap.parse_args()
@@ -731,8 +830,13 @@ def main() -> int:
         return reanalyze(args.reanalyze)
 
     configs = SMOKE if args.smoke else experiments(args.family)
+    if args.only:
+        configs = [c for c in configs if re.search(args.only, c.run_id(0))]
+        if not configs:
+            ap.error(f"--only {args.only!r} matches no configuration of {args.family}")
     repeats = 1 if args.smoke else args.repeats
-    duration_ms = (args.duration or (20 if args.smoke else 50)) * 1000
+    default_s = 20 if args.smoke else REAL_HOUR_S if args.family == "real-hour" else 50
+    duration_ms = (args.duration or default_s) * 1000
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out = args.out or ROOT / "results" / f"{stamp}-{'smoke' if args.smoke else args.family}"
     out.mkdir(parents=True, exist_ok=True)
@@ -749,6 +853,10 @@ def main() -> int:
         print(f"building {IMAGE} at {commit}", flush=True)
         sh("docker", "build", "-q", "-t", IMAGE, "--label", f"{COMMIT_LABEL}={commit}",
            "-f", str(ROOT / "harness" / "Dockerfile"), str(ROOT))
+        if any(c.topology == "cloud" for c in configs):
+            print(f"building {CLOUD_IMAGE} at {commit}", flush=True)
+            sh("docker", "build", "-q", "-t", CLOUD_IMAGE, "--label", f"{COMMIT_LABEL}={commit}",
+               "-f", str(ROOT / "cloud" / "Dockerfile"), str(ROOT))
 
     if args.obs:
         compose(placeholder_env(), "up", "-d", *OBS)
@@ -768,7 +876,8 @@ def main() -> int:
                     print(f"{raw} was measured at {run.commit}, the checkout is {commit}; a sweep must not mix commits")
                     return 1
             else:
-                run = Run(cfg, repeat, duration_ms, args.settle * 1000, heal=not args.no_heal, commit=commit)
+                run = Run(cfg, repeat, duration_ms, args.settle * 1000, heal=not args.no_heal, commit=commit,
+                          trace_from_ms=window_ms(cfg, repeat))
                 try:
                     execute(run, keep_obs=args.obs)
                 except RuntimeError as e:

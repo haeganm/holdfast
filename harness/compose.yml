@@ -21,7 +21,7 @@ services:
       mesh: { ipv4_address: 172.30.0.11 }
       ctl: {}
     command: ["-id=a", "-peers=${A_PEERS}", "-clock=${CLOCK}", "-sync-timeout=${SYNC_TIMEOUT:-2s}", "-clock-offset-ms=${A_OFFSET:-0}",
-              "${SOURCE:--trace=/traces/seed1.jsonl}", "-trace-from-ms=${TRACE_FROM_MS:-0}", "-live-interval=${LIVE_INTERVAL:-9s}", "-live-offset=0s", "-coverage=39.0,-77.0,60", "-t0=${T0}", "-trace-ms=${TRACE_MS}"]
+              "${SOURCE:--trace=/traces/seed1.jsonl}", "-trace-from-ms=${TRACE_FROM_MS:-0}", "-live-interval=${LIVE_INTERVAL:-18s}", "-live-offset=0s", "-coverage=39.0,-77.0,60", "-t0=${T0}", "-trace-ms=${TRACE_MS}"]
   b:
     <<: *node
     container_name: hf-b
@@ -30,7 +30,7 @@ services:
       mesh: { ipv4_address: 172.30.0.12 }
       ctl: {}
     command: ["-id=b", "-peers=${B_PEERS}", "-clock=${CLOCK}", "-sync-timeout=${SYNC_TIMEOUT:-2s}", "-clock-offset-ms=${B_OFFSET:-0}",
-              "${SOURCE:--trace=/traces/seed1.jsonl}", "-trace-from-ms=${TRACE_FROM_MS:-0}", "-live-interval=${LIVE_INTERVAL:-9s}", "-live-offset=3s", "-coverage=39.0,-76.2,60", "-t0=${T0}", "-trace-ms=${TRACE_MS}"]
+              "${SOURCE:--trace=/traces/seed1.jsonl}", "-trace-from-ms=${TRACE_FROM_MS:-0}", "-live-interval=${LIVE_INTERVAL:-18s}", "-live-offset=6s", "-coverage=39.0,-76.2,60", "-t0=${T0}", "-trace-ms=${TRACE_MS}"]
   c:
     <<: *node
     container_name: hf-c
@@ -39,7 +39,7 @@ services:
       mesh: { ipv4_address: 172.30.0.13 }
       ctl: {}
     command: ["-id=c", "-peers=${C_PEERS}", "-clock=${CLOCK}", "-sync-timeout=${SYNC_TIMEOUT:-2s}", "-clock-offset-ms=${C_OFFSET:-0}",
-              "${SOURCE:--trace=/traces/seed1.jsonl}", "-trace-from-ms=${TRACE_FROM_MS:-0}", "-live-interval=${LIVE_INTERVAL:-9s}", "-live-offset=6s", "-coverage=39.0,-77.8,60", "-t0=${T0}", "-trace-ms=${TRACE_MS}"]
+              "${SOURCE:--trace=/traces/seed1.jsonl}", "-trace-from-ms=${TRACE_FROM_MS:-0}", "-live-interval=${LIVE_INTERVAL:-18s}", "-live-offset=12s", "-coverage=39.0,-77.8,60", "-t0=${T0}", "-trace-ms=${TRACE_MS}"]
   hub:
     <<: *node
     profiles: [star]
@@ -49,6 +49,35 @@ services:
       mesh: { ipv4_address: 172.30.0.10 }
       ctl: {}
     command: ["-id=hub", "-peers=", "-clock=${CLOCK}", "-sync-timeout=${SYNC_TIMEOUT:-2s}"]
+
+  # The cloud topology: the cloud peer as the star's hub, backed by DynamoDB
+  # Local on its own internal network, so netem on the mesh link never
+  # touches the store. No token: nothing outside this machine can reach it.
+  cloud:
+    image: holdfast-cloud:dev
+    pull_policy: never
+    profiles: [cloud]
+    container_name: hf-cloud
+    cap_add: [NET_ADMIN]
+    stop_grace_period: 2s
+    ports: ["127.0.0.1:8085:8080"]
+    networks:
+      mesh: { ipv4_address: 172.30.0.14 }
+      ctl: {}
+      store: {}
+    environment:
+      TABLE: holdfast
+      AWS_ENDPOINT_URL_DYNAMODB: http://ddb:8000
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+    command: ["-create-table"]
+  ddb:
+    image: amazon/dynamodb-local:3.3.2@sha256:6ada631ec7aa5fc83446855eb17233e3dad184fec47477e8140c6c569cfe0c86
+    profiles: [cloud]
+    container_name: hf-ddb
+    networks: [store]
+    command: ["-jar", "DynamoDBLocal.jar", "-inMemory"]
 
   # run.py --obs. Both sit only on ctl, so they keep scraping a node the mesh
   # has cut off.
@@ -84,3 +113,5 @@ networks:
     ipam:
       config: [{ subnet: 172.30.0.0/24 }]
   ctl: {}
+  store:
+    internal: true
