@@ -20,7 +20,7 @@ services:
     networks:
       mesh: { ipv4_address: 172.30.0.11 }
       ctl: {}
-    command: ["-id=a", "-peers=${A_PEERS}", "-clock=${CLOCK}", "-clock-offset-ms=${A_OFFSET:-0}",
+    command: ["-id=a", "-peers=${A_PEERS}", "-clock=${CLOCK}", "-sync-timeout=${SYNC_TIMEOUT:-2s}", "-clock-offset-ms=${A_OFFSET:-0}",
               "-trace=/traces/seed1.jsonl", "-coverage=39.0,-77.0,60", "-t0=${T0}", "-trace-ms=${TRACE_MS}"]
   b:
     <<: *node
@@ -29,7 +29,7 @@ services:
     networks:
       mesh: { ipv4_address: 172.30.0.12 }
       ctl: {}
-    command: ["-id=b", "-peers=${B_PEERS}", "-clock=${CLOCK}", "-clock-offset-ms=${B_OFFSET:-0}",
+    command: ["-id=b", "-peers=${B_PEERS}", "-clock=${CLOCK}", "-sync-timeout=${SYNC_TIMEOUT:-2s}", "-clock-offset-ms=${B_OFFSET:-0}",
               "-trace=/traces/seed1.jsonl", "-coverage=39.0,-76.2,60", "-t0=${T0}", "-trace-ms=${TRACE_MS}"]
   c:
     <<: *node
@@ -38,7 +38,7 @@ services:
     networks:
       mesh: { ipv4_address: 172.30.0.13 }
       ctl: {}
-    command: ["-id=c", "-peers=${C_PEERS}", "-clock=${CLOCK}", "-clock-offset-ms=${C_OFFSET:-0}",
+    command: ["-id=c", "-peers=${C_PEERS}", "-clock=${CLOCK}", "-sync-timeout=${SYNC_TIMEOUT:-2s}", "-clock-offset-ms=${C_OFFSET:-0}",
               "-trace=/traces/seed1.jsonl", "-coverage=39.0,-77.8,60", "-t0=${T0}", "-trace-ms=${TRACE_MS}"]
   hub:
     <<: *node
@@ -48,7 +48,7 @@ services:
     networks:
       mesh: { ipv4_address: 172.30.0.10 }
       ctl: {}
-    command: ["-id=hub", "-peers=", "-clock=${CLOCK}"]
+    command: ["-id=hub", "-peers=", "-clock=${CLOCK}", "-sync-timeout=${SYNC_TIMEOUT:-2s}"]
 
 networks:
   mesh:

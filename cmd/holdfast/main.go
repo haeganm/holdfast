@@ -35,6 +35,7 @@ func run() error {
 		listen   = flag.String("listen", ":8080", "listen address")
 		peers    = flag.String("peers", "", "comma-separated peer base URLs")
 		interval = flag.Duration("sync-interval", time.Second, "sync period per peer")
+		timeout  = flag.Duration("sync-timeout", 2*time.Second, "client timeout per sync request")
 		clock    = flag.String("clock", "hlc", "hlc, or wall for the wall-clock baseline")
 		offsetMS = flag.Int("clock-offset-ms", 0, "skew this node's physical clock (experiments)")
 		maxDrift = flag.Duration("max-drift", 5*time.Second, "reject remote stamps further ahead than this")
@@ -65,6 +66,7 @@ func run() error {
 		Wall:         *clock == "wall",
 		ClockOffset:  time.Duration(*offsetMS) * time.Millisecond,
 		MaxDrift:     *maxDrift,
+		Client:       &http.Client{Timeout: *timeout},
 		Logger:       log,
 	})
 	if err != nil {
