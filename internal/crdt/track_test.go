@@ -1,6 +1,7 @@
 package crdt
 
 import (
+	"cmp"
 	"fmt"
 	"maps"
 	"math"
@@ -83,6 +84,47 @@ func TestExpireCommutesWithMerge(t *testing.T) {
 			}
 		}
 		return merged.Hash() == separately.Hash()
+	}
+	if err := quick.Check(prop, propertyConfig(t)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Ord must order exactly as Compare does, over the cases a string encoding
+// gets wrong: origins that are prefixes of each other, negative numbers,
+// -0 against +0, and ties on everything but one field.
+func TestOrdOrdersLikeCompare(t *testing.T) {
+	origins := []string{"a", "a-", "a0", "ab", "b", "z", "0", "-"}
+	nums := []float64{math.Inf(-1), -1e9, -1.5, -0.25, math.Copysign(0, -1), 0, 0.25, 1.5, 1e9, math.Inf(1)}
+	prop := func(seed uint64) bool {
+		r := rng(seed)
+		num := func() float64 { return nums[r.IntN(len(nums))] }
+		a := genTrack(r)
+		a.Origin = origins[r.IntN(len(origins))]
+		a.Obs.Lat, a.Obs.Lon, a.Obs.AltFt, a.Obs.GSKt, a.Obs.HeadingDeg = num(), num(), num(), num(), num()
+		a.Obs.ObservedAtMS = int64(r.IntN(5)) - 2
+		// b is a with exactly one field changed, so every level of the
+		// tie-break gets compared, not just the stamp.
+		b := a
+		switch r.IntN(8) {
+		case 0:
+			b.TS.WallMS = int64(r.IntN(4))
+		case 1:
+			b.TS.Logical = uint32(r.IntN(2))
+		case 2:
+			b.Origin = origins[r.IntN(len(origins))]
+		case 3:
+			b.Obs.ObservedAtMS = int64(r.IntN(5)) - 2
+		case 4:
+			b.Obs.Lat = num()
+		case 5:
+			b.Obs.Lon = num()
+		case 6:
+			b.Obs.AltFt, b.Obs.GSKt = num(), num()
+		case 7:
+			b.Obs.HeadingDeg = num()
+		}
+		return cmp.Compare(Ord(a), Ord(b)) == Compare(a, b)
 	}
 	if err := quick.Check(prop, propertyConfig(t)); err != nil {
 		t.Fatal(err)

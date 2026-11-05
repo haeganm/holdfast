@@ -352,6 +352,25 @@ func TestMergeRegressCountsAStaleWinner(t *testing.T) {
 	}
 }
 
+// A host that restores tracks into a fresh node (the cloud peer does, on every
+// request) must get a clock past them, or the node's next stamp could sort
+// below what it just loaded. Invalid tracks are refused, not loaded.
+func TestRestoreAdvancesTheClockAndRefusesBadTracks(t *testing.T) {
+	n, _ := newLoneNode(t)
+	ahead := hlc.Timestamp{WallMS: time.Now().UnixMilli() + 3000, Logical: 7}
+	refused := n.Restore(map[crdt.ICAO]crdt.Track{
+		"AAAAA1": {Obs: obs(1), TS: ahead, Origin: "b"},
+		"bad":    {Obs: obs(1), TS: ahead, Origin: "b"},
+		"AAAAA2": {Obs: obs(1), TS: hlc.Timestamp{WallMS: time.Now().UnixMilli() + time.Hour.Milliseconds()}, Origin: "b"},
+	})
+	if refused != 2 || len(n.Tracks()) != 1 {
+		t.Fatalf("refused %d, kept %d; want 2 and 1", refused, len(n.Tracks()))
+	}
+	if now := n.clock.Now(); now.Compare(ahead) <= 0 {
+		t.Fatalf("clock at %v after restoring a track at %v", now, ahead)
+	}
+}
+
 func TestMetricsExposition(t *testing.T) {
 	n, srv := newLoneNode(t)
 	n.Ingest("ABCDEF", obs(1))

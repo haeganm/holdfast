@@ -281,6 +281,33 @@ func (n *Node) expire() {
 	}
 }
 
+// Restore loads tracks kept outside the node, such as the cloud peer's table,
+// and advances the clock past every one it keeps. They pass the same checks
+// as a peer's message, one at a time; it returns how many it refused.
+func (n *Node) Restore(tracks map[crdt.ICAO]crdt.Track) (refused int) {
+	limit := n.physNow().Add(n.maxDrift).UnixMilli()
+	keep := make(map[crdt.ICAO]crdt.Track, len(tracks))
+	high := hlc.Timestamp{}
+	for id, t := range tracks {
+		if checkTrack(id, t, limit) != nil {
+			refused++
+			continue
+		}
+		keep[id] = t
+		if t.TS.Compare(high) > 0 {
+			high = t.TS
+		}
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.clock.Update(high)
+	n.tracks.MergeAll(keep)
+	return refused
+}
+
+// Tracks returns a copy of the replica.
+func (n *Node) Tracks() map[crdt.ICAO]crdt.Track { return n.tracks.Snapshot() }
+
 // SensorFailed counts a failed poll of this node's live feed.
 func (n *Node) SensorFailed() { n.c.sensorErrors.Add(1) }
 

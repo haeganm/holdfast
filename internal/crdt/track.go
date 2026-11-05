@@ -14,6 +14,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"hash/fnv"
 	"math"
 	"slices"
@@ -66,6 +67,35 @@ func Compare(a, b Track) int {
 		cmp.Compare(a.Obs.GSKt, b.Obs.GSKt),
 		cmp.Compare(a.Obs.HeadingDeg, b.Obs.HeadingDeg),
 	)
+}
+
+// Ord encodes t as a string whose byte order is Compare's order, so a store
+// that compares strings (DynamoDB condition expressions do) can enforce
+// "only a greater track replaces this one" without decoding it. It covers
+// every field Compare breaks ties on; a checksum would not do, since on a
+// stamp tie it could order two values differently from Compare. t must be
+// valid: an origin of [a-z0-9-], no NaN.
+func Ord(t Track) string {
+	b := make([]byte, 0, 128)
+	b = fmt.Appendf(b, "%016x%08x", uint64(t.TS.WallMS)^1<<63, t.TS.Logical)
+	b = append(b, t.Origin...)
+	b = append(b, ' ') // below every byte an origin may hold, so "a" sorts before "a-" as it does in Go
+	b = fmt.Appendf(b, "%016x", uint64(t.Obs.ObservedAtMS)^1<<63)
+	for _, f := range []float64{t.Obs.Lat, t.Obs.Lon, t.Obs.AltFt, t.Obs.GSKt, t.Obs.HeadingDeg} {
+		b = fmt.Appendf(b, "%016x", orderedBits(f))
+	}
+	return string(b)
+}
+
+// orderedBits maps a float to an unsigned integer with the same order: flip
+// the sign bit of positives, every bit of negatives. -0 and +0 compare equal,
+// so -0 is mapped as +0.
+func orderedBits(f float64) uint64 {
+	u := math.Float64bits(canon(f))
+	if u>>63 == 1 {
+		return ^u
+	}
+	return u | 1<<63
 }
 
 // Merge returns the greater track.

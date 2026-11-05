@@ -37,7 +37,17 @@ mutants=(
   "Ingest stamps without the lock|internal/node/node.go|s/\tn\.mu\.Lock\(\)\n\tdefer n\.mu\.Unlock\(\)\n\tn\.c\.ingestTotal\.Add\(1\)/\tn.c.ingestTotal.Add(1)/"
   "ingest_regress is never counted|internal/node/node.go|s/\t\tn\.c\.ingestRegress\.Add\(1\)\n//"
   "merge_regress is never counted|internal/node/node.go|s/\t\t\tn\.c\.mergeRegress\.Add\(1\)\n//"
+  "Ord drops the origin terminator|internal/crdt/track.go|s/\tb = append\(b, ' '\) \/\/ below/\t\/\/ below/"
+  "Ord treats negative numbers as positive|internal/crdt/track.go|s/\t\treturn \^u\n/\t\treturn u\n/"
+  "Restore does not advance the clock|internal/node/node.go|s/\tn\.clock\.Update\(high\)\n\tn\.tracks\.MergeAll\(keep\)/\t_ = high\n\tn.tracks.MergeAll(keep)/"
+  "Restore loads invalid tracks|internal/node/node.go|s/if checkTrack\(id, t, limit\) != nil \{/if false \&\& checkTrack(id, t, limit) != nil {/"
   "checksum ignores speed and heading|internal/crdt/track.go|s/o\.AltFt, o\.GSKt, o\.HeadingDeg\}/o.AltFt}/"
+  "cloud: the write condition replaces any different track|cloud/peer.go|s/ord < :ord/ord <> :ord/"
+  "cloud: a lost condition counts as an error|cloud/peer.go|s/if errors\.As\(err, &lost\) \{\n\t\treturn false, nil\n\t\}/if false \&\& errors.As(err, \&lost) {\n\t\treturn false, nil\n\t}/"
+  "cloud: changed tracks are never written|cloud/peer.go|s/won, err := p\.save\(ctx, changed\)/won, err := p.save(ctx, nil)/"
+  "cloud: the token is not checked|cloud/peer.go|s/if p\.token != \"\" && subtle/if false \&\& subtle/"
+  "cloud: only the first page is read|cloud/peer.go|s/for pages := dynamodb\.NewScanPaginator\(p\.db, in\); pages\.HasMorePages\(\); \{/for pages, first := dynamodb.NewScanPaginator(p.db, in), true; pages.HasMorePages() \&\& first; first = false {/"
+  "cloud: a stored ord is trusted without checking|cloud/peer.go|s/if str\(\"ord\"\) != crdt\.Ord\(t\) \{/if false \&\& str(\"ord\") != crdt.Ord(t) {/"
   "harness: full recovery ignores its floor|harness/run.py|s/if v > worst_floor:\n            start = None/if False:\n            start = None/"
   "harness: full recovery accepts a single dip|harness/run.py|s/if t - start >= SUSTAIN_MS:/if t - start >= 0:/"
   "harness: full recovery floor is the best pre-cut moment|harness/run.py|s/worst_floor = max\(before\)/worst_floor = min(before)/"
@@ -60,12 +70,34 @@ mutants=(
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
+# The cloud peer's tests need DynamoDB Local (check.sh starts one).
+if [[ -z "${HOLDFAST_DYNAMODB:-}" ]]; then
+  echo "mutants: HOLDFAST_DYNAMODB is not set; the cloud mutants need DynamoDB Local (check.sh starts one)"
+  exit 1
+fi
+export HOLDFAST_REQUIRE_DYNAMODB=1
+
+copy() {
+  rm -rf "$work/src"
+  mkdir -p "$work/src"
+  (cd "$root" && tar -cf - --exclude=cloud/terraform --exclude=cloud/build \
+    go.mod cmd internal cloud harness/run.py harness/test_run.py) | (cd "$work/src" && tar -xf -)
+}
+
+# Every suite has to pass unmutated first. Otherwise a broken environment
+# (DynamoDB down, say) would fail every mutant's tests and read as kills.
+copy
+if ! (cd "$work/src" && go test -vet=off -count=1 ./internal/... >/dev/null 2>&1 \
+      && "$PY" -m unittest discover -s harness >/dev/null 2>&1 \
+      && (cd cloud && go test -vet=off -count=1 ./... >/dev/null 2>&1)); then
+  echo "mutants: the unmutated tests fail, so no kill would mean anything; fix that first"
+  exit 1
+fi
+
 failed=0
 for m in "${mutants[@]}"; do
   IFS='|' read -r desc file sub <<<"$m"
-  rm -rf "$work/src"
-  mkdir -p "$work/src"
-  (cd "$root" && tar -cf - go.mod cmd internal harness/run.py harness/test_run.py) | (cd "$work/src" && tar -xf -)
+  copy
   before="$(sha256sum "$work/src/$file" | cut -d' ' -f1)"
   perl -0pi -e "$sub" "$work/src/$file"
   after="$(sha256sum "$work/src/$file" | cut -d' ' -f1)"
@@ -79,6 +111,9 @@ for m in "${mutants[@]}"; do
   if [[ "$file" == *.py ]]; then
     build=("$PY" -m py_compile "$file")
     test=("$PY" -m unittest discover -s harness)
+  elif [[ "$file" == cloud/* ]]; then
+    build=(bash -c 'cd cloud && go test -vet=off -count=1 -run "^$" ./...')
+    test=(bash -c 'cd cloud && go test -vet=off -count=1 ./...')
   else
     build=(go test -vet=off -count=1 -run '^$' ./internal/...)
     test=(go test -vet=off -count=1 ./internal/...)

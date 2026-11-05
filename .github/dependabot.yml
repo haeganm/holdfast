@@ -12,3 +12,12 @@ updates:
   - package-ecosystem: pip
     directory: /harness
     schedule: { interval: weekly }
+  - package-ecosystem: gomod
+    directory: /cloud
+    schedule: { interval: weekly }
+  - package-ecosystem: terraform
+    directory: /cloud/terraform
+    schedule: { interval: weekly }
+  - package-ecosystem: docker-compose
+    directory: /harness
+    schedule: { interval: weekly }
