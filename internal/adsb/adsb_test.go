@@ -207,6 +207,48 @@ func TestFollowReportsAndSurvivesABadFeed(t *testing.T) {
 	}
 }
 
+func TestBackoffNeverUndercutsTheIntervalOrRetryAfter(t *testing.T) {
+	for _, c := range []struct{ last, every, retry, want time.Duration }{
+		{3 * time.Second, 3 * time.Second, 0, 6 * time.Second},
+		{24 * time.Second, 3 * time.Second, 0, maxBackoff},
+		{45 * time.Second, 45 * time.Second, 0, 45 * time.Second}, // a slow feed's own interval stands
+		{45 * time.Second, 45 * time.Second, 2 * time.Minute, 2 * time.Minute},
+		{3 * time.Second, 3 * time.Second, 10 * time.Second, 10 * time.Second},
+	} {
+		if got := backoff(c.last, c.every, c.retry); got != c.want {
+			t.Errorf("backoff(%v, %v, %v) = %v, want %v", c.last, c.every, c.retry, got, c.want)
+		}
+	}
+}
+
+func TestFollowRefusesANonPositiveInterval(t *testing.T) {
+	var failed error
+	Feed{URL: "http://unused", Every: 0}.Follow(context.Background(), func([]Report) { t.Fatal("polled") },
+		func(err error) { failed = err })
+	if failed == nil {
+		t.Fatal("an interval of 0 would poll a public feed in a tight loop")
+	}
+}
+
+func TestSensorForgetsAircraftLongGoneQuiet(t *testing.T) {
+	s := NewSensor()
+	s.New([]Report{{"AAAAA1", crdt.Observation{Lat: 1, ObservedAtMS: 1}}})
+	s.New([]Report{{"AAAAA2", crdt.Observation{Lat: 1, ObservedAtMS: 1 + forget.Milliseconds() + 1}}})
+	if _, kept := s.last["AAAAA1"]; kept || len(s.last) != 1 {
+		t.Fatalf("still remembers %d aircraft, including one quiet for over %v", len(s.last), forget)
+	}
+}
+
+func TestParseKeepsTheSameDuplicateWhateverTheOrder(t *testing.T) {
+	one := `{"hex":"abcdef","lat":39,"lon":-77,"alt_baro":1000,"seen_pos":1}`
+	two := `{"hex":"abcdef","lat":39,"lon":-77,"alt_baro":2000,"seen_pos":1}`
+	a, _, _, _ := Parse(strings.NewReader(`{"now":1700000000000,"ac":[` + one + "," + two + "]}"))
+	b, _, _, _ := Parse(strings.NewReader(`{"now":1700000000000,"ac":[` + two + "," + one + "]}"))
+	if len(a) != 1 || len(b) != 1 || a[0] != b[0] {
+		t.Fatalf("order changed the result: %+v vs %+v", a, b)
+	}
+}
+
 func TestPollReadsRetryAfter(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Retry-After", "7")

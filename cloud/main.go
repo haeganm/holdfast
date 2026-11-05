@@ -52,8 +52,17 @@ func run(log *slog.Logger, listen string, create bool) error {
 		return nil
 	}
 	if create {
-		if err := ensureTable(context.Background(), p.db, p.table); err != nil {
-			return err
+		// DynamoDB Local can take a few seconds to come up next to us.
+		deadline := time.Now().Add(30 * time.Second)
+		for {
+			err := ensureTable(context.Background(), p.db, p.table)
+			if err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				return fmt.Errorf("create table %s: %w", p.table, err)
+			}
+			time.Sleep(500 * time.Millisecond)
 		}
 	}
 	if p.token == "" {

@@ -94,11 +94,25 @@ func push(t *testing.T, h http.Handler, tracks map[crdt.ICAO]crdt.Track) {
 
 func stored(t *testing.T, p *peer) map[crdt.ICAO]crdt.Track {
 	t.Helper()
-	got, bad, err := p.load(context.Background())
-	if err != nil || bad != 0 {
-		t.Fatalf("load: %v, %d bad items", err, bad)
+	got, _, bad, err := p.load(context.Background())
+	if err != nil || len(bad) != 0 {
+		t.Fatalf("load: %v, bad items %v", err, bad)
 	}
 	return got
+}
+
+func TestPeerStatsCountTheWork(t *testing.T) {
+	p := newPeer(t)
+	first := track(1, "b")
+	push(t, p, map[crdt.ICAO]crdt.Track{"AAAAA1": first, "AAAAA2": track(2, "b")})
+	push(t, p, map[crdt.ICAO]crdt.Track{"AAAAA1": first}) // a redelivery writes nothing
+	var s map[string]int64
+	if err := json.Unmarshal(call(t, p, http.MethodGet, "/peer", nil).Body.Bytes(), &s); err != nil {
+		t.Fatal(err)
+	}
+	if s["requests"] != 2 || s["writes"] != 2 || s["won"] != 2 || s["items_read"] != 2 || s["failed"] != 0 {
+		t.Fatalf("stats %v", s)
+	}
 }
 
 func TestTokenIsRequired(t *testing.T) {
@@ -136,7 +150,7 @@ func TestTheStoreKeepsWhatMergeKeeps(t *testing.T) {
 		id := crdt.ICAO(fmt.Sprintf("%06X", i))
 		a, b := gen(), gen()
 		for _, tr := range []crdt.Track{a, b} {
-			if _, err := p.put(context.Background(), id, tr); err != nil {
+			if _, err := p.put(context.Background(), id, tr, "", false); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -199,12 +213,59 @@ func TestABadItemIsSkipped(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	got, bad, err := p.load(context.Background())
-	if err != nil || bad != 2 || len(got) != 1 {
-		t.Fatalf("load: %d good, %d bad, %v; want 1 and 2", len(got), bad, err)
+	got, _, bad, err := p.load(context.Background())
+	if err != nil || len(bad) != 2 || len(got) != 1 {
+		t.Fatalf("load: %d good, bad %v, %v; want 1 and 2", len(got), bad, err)
 	}
 	if rec := call(t, p, http.MethodGet, "/state", nil); rec.Code != http.StatusOK {
 		t.Fatalf("state with bad items in the table: %d", rec.Code)
+	}
+}
+
+// A bad item still holds its key and ord. A valid write for that aircraft has
+// to replace it whatever it holds: a corrupt ord that sorts high, a valid
+// track with a mismatched ord, no ord at all, or a track Restore refuses (a
+// stamp far in the future). Otherwise the aircraft is blocked for good.
+func TestAValidWriteReplacesABadItem(t *testing.T) {
+	p := newPeer(t)
+	future := track(1, "b")
+	future.TS.WallMS += time.Hour.Milliseconds()
+	futureJSON, _ := json.Marshal(future)
+	goodJSON, _ := json.Marshal(track(1, "b"))
+	bad := map[crdt.ICAO]map[string]types.AttributeValue{
+		"AAAAA1": {"t": &types.AttributeValueMemberS{Value: "{not json"}, "ord": &types.AttributeValueMemberS{Value: "zzzzzzzz"}},
+		"AAAAA2": {"t": &types.AttributeValueMemberS{Value: string(goodJSON)}, "ord": &types.AttributeValueMemberS{Value: "zzzzzzzz"}},
+		"AAAAA3": {"t": &types.AttributeValueMemberS{Value: "{not json"}},
+		"AAAAA4": {"t": &types.AttributeValueMemberS{Value: string(futureJSON)}, "ord": &types.AttributeValueMemberS{Value: crdt.Ord(future)}},
+	}
+	valid := map[crdt.ICAO]crdt.Track{}
+	for id, item := range bad {
+		item["icao"] = &types.AttributeValueMemberS{Value: string(id)}
+		if _, err := p.db.PutItem(context.Background(), &dynamodb.PutItemInput{TableName: &p.table, Item: item}); err != nil {
+			t.Fatal(err)
+		}
+		valid[id] = track(2, "c")
+	}
+	push(t, p, valid)
+	if got := stored(t, p); crdt.HashOf(got) != crdt.HashOf(valid) {
+		t.Fatalf("after a valid push the table holds %d good tracks of %d", len(got), len(valid))
+	}
+}
+
+// The table's own TTL attribute is the stamp plus the track TTL, in epoch
+// seconds, so DynamoDB drops an aircraft after the edges would.
+func TestItemsExpireWithTheirTrack(t *testing.T) {
+	p := newPeer(t)
+	tr := track(1, "b")
+	push(t, p, map[crdt.ICAO]crdt.Track{"AAAAA1": tr})
+	out, err := p.db.GetItem(context.Background(), &dynamodb.GetItemInput{TableName: &p.table,
+		Key: map[string]types.AttributeValue{"icao": &types.AttributeValueMemberS{Value: "AAAAA1"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := out.Item["expires"].(*types.AttributeValueMemberN).Value
+	if want := fmt.Sprint(time.UnixMilli(tr.TS.WallMS).Add(p.ttl).Unix() + 1); got != want {
+		t.Fatalf("expires %s, want %s", got, want)
 	}
 }
 

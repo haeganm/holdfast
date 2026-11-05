@@ -83,6 +83,9 @@ func main() {
 	case *out == "" || *dur <= 0:
 		flag.Usage()
 		os.Exit(2)
+	case len(sens) > 0 && *every <= 0:
+		fmt.Fprintln(os.Stderr, "gentrace: -every must be positive")
+		os.Exit(2)
 	case len(sens) > 0:
 		err = record(sens, *feed, *every, *dur, *out)
 	case *aircraft < 1:
@@ -173,16 +176,26 @@ func finish(out string) error {
 	}
 	var recs []replay.Record
 	sc := bufio.NewScanner(f)
+	lines, broken := 0, 0
 	for sc.Scan() {
+		lines++
 		var r replay.Record
 		if err := json.Unmarshal(sc.Bytes(), &r); err != nil {
-			break // the last line of a killed recording can be cut short
+			if broken == 0 {
+				broken = lines
+			}
+			continue
 		}
 		recs = append(recs, r)
 	}
 	f.Close()
 	if err := sc.Err(); err != nil {
 		return err
+	}
+	// A killed recording can leave its last line cut short, and only that
+	// one. Anything else means the file is damaged: keep it for a person.
+	if broken != 0 && broken != lines {
+		return fmt.Errorf("%s.partial: line %d of %d does not parse; only a cut-off last line is expected, so the file is kept as it is", out, broken, lines)
 	}
 	slices.SortStableFunc(recs, func(a, b replay.Record) int {
 		return cmp.Or(cmp.Compare(a.TMS, b.TMS), strings.Compare(a.Node, b.Node), strings.Compare(a.ICAO, b.ICAO))

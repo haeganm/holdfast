@@ -15,8 +15,13 @@
 // The logical counter only grows while the physical clock trails the latest
 // timestamp seen. It never exceeds MaxLogical: past that the clock moves to
 // the next millisecond instead, so a node that received a stamp at the bound
-// never emits one its peers would reject. Callers must reject remote stamps
-// whose logical part is already over MaxLogical.
+// never emits a logical part its peers would reject. Callers must reject
+// remote stamps whose logical part is already over MaxLogical.
+//
+// One edge remains, and it heals itself: a stamp at both bounds at once
+// (wall part exactly at a receiver's drift limit, logical part at MaxLogical)
+// rolls the receiver 1 ms past that limit, and a peer whose limit is the same
+// refuses its messages until its own clock moves on by that millisecond.
 package hlc
 
 import (

@@ -272,25 +272,31 @@ func (n *Node) cutoff() int64 {
 
 // expire drops the aircraft whose tracks have expired.
 func (n *Node) expire() {
-	cut := n.cutoff()
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	for _, id := range n.tracks.Expire(cut) {
+	n.expireLocked()
+}
+
+// expireLocked is expire for a caller that holds mu.
+func (n *Node) expireLocked() {
+	for _, id := range n.tracks.Expire(n.cutoff()) {
 		delete(n.own, id)
 		n.c.expired.Add(1)
 	}
 }
 
 // Restore loads tracks kept outside the node, such as the cloud peer's table,
-// and advances the clock past every one it keeps. They pass the same checks
-// as a peer's message, one at a time; it returns how many it refused.
-func (n *Node) Restore(tracks map[crdt.ICAO]crdt.Track) (refused int) {
+// and advances the clock past every one it keeps. Each passes the same checks
+// as a track in a peer's message, and one that has already expired is left
+// out, as a peer's would be. It returns the aircraft it refused as invalid,
+// so the host can repair what it stores for them.
+func (n *Node) Restore(tracks map[crdt.ICAO]crdt.Track) (refused []crdt.ICAO) {
 	limit := n.physNow().Add(n.maxDrift).UnixMilli()
 	keep := make(map[crdt.ICAO]crdt.Track, len(tracks))
 	high := hlc.Timestamp{}
 	for id, t := range tracks {
 		if checkTrack(id, t, limit) != nil {
-			refused++
+			refused = append(refused, id)
 			continue
 		}
 		keep[id] = t
@@ -300,8 +306,11 @@ func (n *Node) Restore(tracks map[crdt.ICAO]crdt.Track) (refused int) {
 	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	cut := n.cutoff()
+	maps.DeleteFunc(keep, func(_ crdt.ICAO, t crdt.Track) bool { return t.TS.WallMS < cut })
 	n.clock.Update(high)
 	n.tracks.MergeAll(keep)
+	slices.Sort(refused)
 	return refused
 }
 
@@ -319,7 +328,6 @@ func (n *Node) receive(msgTS hlc.Timestamp, tracks map[crdt.ICAO]crdt.Track) err
 		n.c.rejected.Add(1)
 		return err
 	}
-	cut := n.cutoff()
 	high := msgTS
 	for _, t := range tracks {
 		if t.TS.Compare(high) > 0 {
@@ -328,6 +336,9 @@ func (n *Node) receive(msgTS hlc.Timestamp, tracks map[crdt.ICAO]crdt.Track) err
 	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	// The cutoff is read under the lock, like expire's: read before it, an
+	// expire could drop a version in between and this merge bring it back.
+	cut := n.cutoff()
 	n.clock.Update(high)
 	for id, t := range tracks {
 		if t.TS.WallMS < cut {
@@ -424,6 +435,23 @@ func (n *Node) Run(ctx context.Context) {
 	for _, p := range n.peers {
 		wg.Go(func() { n.syncLoop(ctx, p) })
 	}
+	// Expiry and the end of the startup hold also ride on sync rounds, but
+	// a node with no peers has none, and must still forget old aircraft.
+	wg.Go(func() {
+		tick := time.NewTicker(n.interval)
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+			}
+			n.mu.Lock()
+			n.holding()
+			n.mu.Unlock()
+			n.expire()
+		}
+	})
 	wg.Wait()
 }
 

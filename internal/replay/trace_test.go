@@ -72,6 +72,7 @@ func TestReadRejectsBadLines(t *testing.T) {
 		{"unknown field", `{"t_ms":0,"icao":"ABCDEF","lat":39,"lon":-77,"alt":1,"gs":1,"hdg":1,"x":1}`, "line 1: json: unknown field"},
 		{"latitude", `{"t_ms":0,"icao":"ABCDEF","lat":91,"lon":-77,"alt":1,"gs":1,"hdg":1}`, "out of range"},
 		{"garbage", ok + "\nnot json", "line 2:"},
+		{"t_ms past a year", `{"t_ms":9300000000000,"icao":"ABCDEF","lat":39,"lon":-77,"alt":1,"gs":1,"hdg":1}`, "t_ms"},
 		{"bad node", `{"t_ms":0,"icao":"ABCDEF","lat":39,"lon":-77,"alt":1,"gs":1,"hdg":1,"node":"A B"}`, "node"},
 		{"negative delay", `{"t_ms":0,"icao":"ABCDEF","lat":39,"lon":-77,"alt":1,"gs":1,"hdg":1,"delay_ms":-1}`, "delay_ms"},
 		{"absurd delay", `{"t_ms":0,"icao":"ABCDEF","lat":39,"lon":-77,"alt":1,"gs":1,"hdg":1,"delay_ms":3600000}`, "delay_ms"},

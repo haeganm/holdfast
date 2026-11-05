@@ -13,6 +13,7 @@ TRIVY_IMAGE="aquasec/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f
 export HOLDFAST_PROPERTY_RUNS="${HOLDFAST_PROPERTY_RUNS:-2000}"
 export HOLDFAST_SIM_RUNS="${HOLDFAST_SIM_RUNS:-500}"
 FUZZ_TIME="${HOLDFAST_FUZZ_TIME:-20s}"
+ADSB_FUZZ_TIME="${HOLDFAST_ADSB_FUZZ_TIME:-10s}"
 # Pinned like everything else; both were at least three weeks old when chosen.
 STATICCHECK="honnef.co/go/tools/cmd/staticcheck@v0.8.2"
 GOVULNCHECK="golang.org/x/vuln/cmd/govulncheck@v1.9.0"
@@ -69,9 +70,9 @@ else
     "$GOLANG_IMAGE" go test -race -count=1 ./...
 fi
 
-step "fuzz the trust boundary for $FUZZ_TIME, and the ADS-B parser for half that"
+step "fuzz the trust boundary for $FUZZ_TIME, and the ADS-B parser for $ADSB_FUZZ_TIME"
 go test -run '^$' -fuzz '^FuzzHandlers$' -fuzztime "$FUZZ_TIME" ./internal/node
-go test -run '^$' -fuzz '^FuzzParse$' -fuzztime "$((${FUZZ_TIME%s} / 2))s" ./internal/adsb
+go test -run '^$' -fuzz '^FuzzParse$' -fuzztime "$ADSB_FUZZ_TIME" ./internal/adsb
 
 step "mutants"
 scripts/mutants.sh

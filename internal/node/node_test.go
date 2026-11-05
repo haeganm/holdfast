@@ -363,8 +363,8 @@ func TestRestoreAdvancesTheClockAndRefusesBadTracks(t *testing.T) {
 		"bad":    {Obs: obs(1), TS: ahead, Origin: "b"},
 		"AAAAA2": {Obs: obs(1), TS: hlc.Timestamp{WallMS: time.Now().UnixMilli() + time.Hour.Milliseconds()}, Origin: "b"},
 	})
-	if refused != 2 || len(n.Tracks()) != 1 {
-		t.Fatalf("refused %d, kept %d; want 2 and 1", refused, len(n.Tracks()))
+	if len(refused) != 2 || len(n.Tracks()) != 1 {
+		t.Fatalf("refused %v, kept %d; want 2 and 1", refused, len(n.Tracks()))
 	}
 	if now := n.clock.Now(); now.Compare(ahead) <= 0 {
 		t.Fatalf("clock at %v after restoring a track at %v", now, ahead)
@@ -522,5 +522,81 @@ func TestIngestRegressCountsAnOlderLocalReportWinning(t *testing.T) {
 	}
 	if c := n.Counters(); c.IngestRegress != 1 || c.IngestLost != 0 {
 		t.Fatalf("ingest_regress=%d ingest_lost=%d, want 1 and 0", c.IngestRegress, c.IngestLost)
+	}
+}
+
+// An aircraft restored from storage after its track expired stays out, as it
+// would from a peer, and isn't reported as invalid: nothing needs repairing.
+func TestRestoreLeavesOutExpiredTracks(t *testing.T) {
+	now := time.UnixMilli(simStartMS)
+	n, err := New(Config{ID: "cloud", Now: func() time.Time { return now }, StartupHold: -1, TrackTTL: 5 * time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := crdt.Track{Obs: obs(1), TS: hlc.Timestamp{WallMS: simStartMS - time.Hour.Milliseconds()}, Origin: "b"}
+	live := crdt.Track{Obs: obs(2), TS: hlc.Timestamp{WallMS: simStartMS}, Origin: "b"}
+	refused := n.Restore(map[crdt.ICAO]crdt.Track{"AAAAA1": old, "AAAAA2": live})
+	if len(refused) != 0 || len(n.Tracks()) != 1 {
+		t.Fatalf("refused %v and kept %d, want none refused and only the live one kept", refused, len(n.Tracks()))
+	}
+}
+
+// A node with no peers has no sync rounds, and must still expire.
+func TestALoneNodeStillExpires(t *testing.T) {
+	var nowMS atomic.Int64
+	nowMS.Store(simStartMS)
+	n, err := New(Config{ID: "a", Now: func() time.Time { return time.UnixMilli(nowMS.Load()) }, StartupHold: -1,
+		TrackTTL: time.Minute, SyncInterval: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n.Ingest("AAAAA1", obs(simStartMS))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go n.Run(ctx)
+	nowMS.Add(time.Hour.Milliseconds())
+	waitFor(t, "the lone node to expire its aircraft", func() bool { return n.tracks.Len() == 0 })
+}
+
+// An expire that lands while a receive is under way must not let the receive
+// bring the version back. The test holds the node lock, starts a receive that
+// redelivers a version, and lets it run until it waits on the lock. Still
+// holding the lock, it moves time past the version's expiry and expires it,
+// then lets go. A receive that read its expiry cutoff before taking the lock
+// now merges with a stale cutoff and brings the version back; one that reads
+// it under the lock refuses it.
+func TestAnExpireDuringAReceiveCannotBringAVersionBack(t *testing.T) {
+	const ttl = 10 * time.Second
+	var nowMS atomic.Int64
+	validated := make(chan struct{}, 1)
+	var armed atomic.Bool
+	clock := func() time.Time {
+		if armed.CompareAndSwap(true, false) { // receive's first read: validate
+			validated <- struct{}{}
+		}
+		return time.UnixMilli(nowMS.Load())
+	}
+	nowMS.Store(simStartMS)
+	n, err := New(Config{ID: "a", Now: clock, StartupHold: -1, TrackTTL: ttl})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := crdt.Track{Obs: obs(1), TS: hlc.Timestamp{WallMS: simStartMS - ttl.Milliseconds()}, Origin: "b"} // live until now
+	n.tracks.Put("AAAAA1", v)
+
+	n.mu.Lock()
+	armed.Store(true)
+	done := make(chan error)
+	go func() { done <- n.receive(hlc.Timestamp{WallMS: simStartMS}, map[crdt.ICAO]crdt.Track{"AAAAA1": v}) }()
+	<-validated
+	time.Sleep(50 * time.Millisecond) // long enough to reach the lock, by orders of magnitude
+	nowMS.Add(1)                      // v has now expired
+	n.expireLocked()
+	n.mu.Unlock()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if _, held := n.Tracks()["AAAAA1"]; held {
+		t.Fatalf("the node holds a version stamped %v, below its own cutoff %d", v.TS, n.cut.Load())
 	}
 }

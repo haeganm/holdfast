@@ -24,6 +24,25 @@ func TestSensorFlag(t *testing.T) {
 	}
 }
 
+// A broken line anywhere but the end is not a killed recording: finish must
+// not drop it and the rest, and must keep the partial file.
+func TestFinishRefusesADamagedRecording(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "rec.jsonl.gz")
+	partial := `{"t_ms":1000,"icao":"A1B2C3","lat":39,"lon":-77,"alt":0,"gs":0,"hdg":0,"node":"a"}
+garbage
+{"t_ms":2000,"icao":"A1B2C3","lat":39,"lon":-77,"alt":0,"gs":0,"hdg":0,"node":"b"}
+`
+	if err := os.WriteFile(out+".partial", []byte(partial), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := finish(out); err == nil {
+		t.Fatal("finish accepted a recording with a broken line in the middle")
+	}
+	if _, err := os.Stat(out + ".partial"); err != nil {
+		t.Fatal("the damaged partial file was not kept")
+	}
+}
+
 // A recording killed mid-write leaves an unsorted partial file whose last
 // line may be cut short. finish keeps every whole line, sorts them, writes a
 // trace that reads back, and removes the partial file.

@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"net/http"
 	"regexp"
@@ -100,6 +101,9 @@ func Parse(r io.Reader) (reports []Report, skipped int, made time.Time, err erro
 			cmp.Compare(b.Obs.ObservedAtMS, a.Obs.ObservedAtMS),
 			cmp.Compare(a.Obs.Lat, b.Obs.Lat),
 			cmp.Compare(a.Obs.Lon, b.Obs.Lon),
+			cmp.Compare(a.Obs.AltFt, b.Obs.AltFt),
+			cmp.Compare(a.Obs.GSKt, b.Obs.GSKt),
+			cmp.Compare(a.Obs.HeadingDeg, b.Obs.HeadingDeg),
 		)
 	})
 	reports = slices.CompactFunc(reports, func(a, b Report) bool { return a.ICAO == b.ICAO })
@@ -161,11 +165,21 @@ type Feed struct {
 // feed's allowance must not starve each other by backing off for minutes.
 const maxBackoff = 30 * time.Second
 
+// backoff is the wait after a refusal: the last wait doubled, up to
+// maxBackoff, but never shorter than the normal interval or than what the
+// feed asked for in Retry-After.
+func backoff(last, every, retryAfter time.Duration) time.Duration {
+	return max(min(2*last, maxBackoff), every, retryAfter)
+}
+
 // Follow polls the feed until ctx is done and calls got with every
 // successful response. fail is called for every failed poll. After a
-// refusal or a server error the interval doubles, up to maxBackoff, or
-// follows the feed's Retry-After if it sends one.
+// refusal or a server error the wait backs off (see backoff).
 func (f Feed) Follow(ctx context.Context, got func([]Report), fail func(error)) {
+	if f.Every <= 0 {
+		fail(fmt.Errorf("poll interval %v: must be positive", f.Every))
+		return
+	}
 	wait := f.Every
 	next := time.Now()
 	for {
@@ -188,7 +202,7 @@ func (f Feed) Follow(ctx context.Context, got func([]Report), fail func(error)) 
 		switch {
 		case errors.As(err, &busy):
 			fail(err)
-			wait = min(max(2*wait, busy.retryAfter), maxBackoff)
+			wait = backoff(wait, f.Every, busy.retryAfter)
 		case err != nil:
 			if ctx.Err() == nil {
 				fail(err)
@@ -210,10 +224,16 @@ type Sensor struct {
 
 func NewSensor() *Sensor { return &Sensor{last: map[crdt.ICAO]crdt.Observation{}} }
 
+// forget drops what a sensor remembers about an aircraft it hasn't heard
+// from in this long, so a live sensor's memory stays bounded.
+const forget = 10 * time.Minute
+
 // New returns the reports that are new observations, in order.
 func (s *Sensor) New(reports []Report) []Report {
 	var out []Report
+	var newest int64
 	for _, r := range reports {
+		newest = max(newest, r.Obs.ObservedAtMS)
 		prev, seen := s.last[r.ICAO]
 		moved := !seen || prev.Lat != r.Obs.Lat || prev.Lon != r.Obs.Lon
 		if r.Obs.ObservedAtMS > prev.ObservedAtMS && (moved || r.Obs.ObservedAtMS-prev.ObservedAtMS > 1000) {
@@ -221,6 +241,7 @@ func (s *Sensor) New(reports []Report) []Report {
 			out = append(out, r)
 		}
 	}
+	maps.DeleteFunc(s.last, func(_ crdt.ICAO, o crdt.Observation) bool { return o.ObservedAtMS < newest-forget.Milliseconds() })
 	return out
 }
 

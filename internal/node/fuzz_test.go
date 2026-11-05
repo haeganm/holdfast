@@ -87,8 +87,10 @@ func FuzzHandlers(f *testing.F) {
 
 		limit := n.physNow().Add(n.maxDrift).UnixMilli()
 		clk := n.clock.Peek()
-		if clk.WallMS > limit {
-			t.Fatalf("clock at %v, past the drift bound %d", clk, limit)
+		// A stamp at both the drift limit and the logical bound rolls the
+		// clock 1 ms further, and no more (see the hlc package doc).
+		if clk.WallMS > limit+1 {
+			t.Fatalf("clock at %v, more than 1 ms past the drift bound %d", clk, limit)
 		}
 		for id, tr := range n.tracks.Snapshot() {
 			if err := checkTrack(id, tr, limit); err != nil {

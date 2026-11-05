@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -47,6 +48,27 @@ type peer struct {
 	now      func() time.Time
 	log      *slog.Logger
 	pageSize int32 // 0 for DynamoDB's own; tests shrink it to exercise paging
+	stats    stats
+}
+
+// stats count this process's work for edges (their POST /sync and /push;
+// reads such as the harness's /state polls are left out), served at
+// GET /peer. In Lambda that is one instance; under the harness it is the
+// whole run, which turns into a measured cost per report before anything is
+// deployed.
+type stats struct {
+	Requests  atomic.Int64 `json:"requests"`
+	ItemsRead atomic.Int64 `json:"items_read"`
+	Writes    atomic.Int64 `json:"writes"`
+	Won       atomic.Int64 `json:"won"`
+	Failed    atomic.Int64 `json:"failed"` // requests answered 503
+}
+
+func (s *stats) MarshalJSON() ([]byte, error) {
+	return json.Marshal(map[string]int64{
+		"requests": s.Requests.Load(), "items_read": s.ItemsRead.Load(),
+		"writes": s.Writes.Load(), "won": s.Won.Load(), "failed": s.Failed.Load(),
+	})
 }
 
 func (p *peer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -54,19 +76,41 @@ func (p *peer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	if r.Method == http.MethodGet && r.URL.Path == "/peer" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(&p.stats)
+		return
+	}
+	edge := r.Method == http.MethodPost
+	if edge {
+		p.stats.Requests.Add(1)
+	}
 	ctx := r.Context()
-	stored, bad, err := p.load(ctx)
+	stored, ords, bad, err := p.load(ctx)
 	if err != nil {
+		if edge {
+			p.stats.Failed.Add(1)
+		}
 		p.log.Error("load", "err", err)
 		http.Error(w, "store unavailable", http.StatusServiceUnavailable)
 		return
+	}
+	if edge {
+		p.stats.ItemsRead.Add(int64(len(stored) + len(bad)))
 	}
 	n, err := node.New(node.Config{ID: "cloud", Now: p.now, StartupHold: -1, TrackTTL: p.ttl})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	bad += n.Restore(stored)
+	// An item that doesn't decode, or that Restore refuses, still holds its
+	// key and its ord in the table. A valid write must be able to replace it,
+	// or a corrupt item that sorts high would block that aircraft for good.
+	bad = append(bad, n.Restore(stored)...)
+	replace := make(map[crdt.ICAO]string, len(bad))
+	for _, id := range bad {
+		replace[id] = ords[id]
+	}
 	before := n.Tracks()
 	resp := &buffered{header: http.Header{}, status: http.StatusOK}
 	n.Handler().ServeHTTP(resp, r)
@@ -77,12 +121,15 @@ func (p *peer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			changed[id] = t
 		}
 	}
-	won, err := p.save(ctx, changed)
-	p.log.Info("request", "path", r.URL.Path, "status", resp.status, "stored", len(stored), "bad", bad,
+	won, err := p.save(ctx, changed, replace)
+	p.stats.Writes.Add(int64(len(changed)))
+	p.stats.Won.Add(int64(won))
+	p.log.Info("request", "path", r.URL.Path, "status", resp.status, "stored", len(stored), "bad", len(bad),
 		"changed", len(changed), "won", won, "err", err)
 	if err != nil {
 		// Nothing is lost: what was written is a max-merge, and the edge's
 		// next round sends whatever is still missing.
+		p.stats.Failed.Add(1)
 		http.Error(w, "store unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -94,55 +141,60 @@ func (p *peer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // load reads the whole table. An item that does not decode, or whose ord
-// does not match its track, is skipped and counted: the table is outside the
-// node's trust boundary, and Restore validates what does decode.
-func (p *peer) load(ctx context.Context) (map[crdt.ICAO]crdt.Track, int, error) {
+// does not match its track, is skipped and reported: the table is outside the
+// node's trust boundary, and Restore validates what does decode. ords holds
+// every item's stored ord as it is, so a bad item can be replaced exactly.
+func (p *peer) load(ctx context.Context) (tracks map[crdt.ICAO]crdt.Track, ords map[crdt.ICAO]string, bad []crdt.ICAO, err error) {
 	in := &dynamodb.ScanInput{TableName: &p.table, ConsistentRead: aws.Bool(true)}
 	if p.pageSize > 0 {
 		in.Limit = &p.pageSize
 	}
-	out := map[crdt.ICAO]crdt.Track{}
-	bad := 0
+	tracks, ords = map[crdt.ICAO]crdt.Track{}, map[crdt.ICAO]string{}
 	for pages := dynamodb.NewScanPaginator(p.db, in); pages.HasMorePages(); {
 		page, err := pages.NextPage(ctx)
 		if err != nil {
-			return nil, 0, err
+			return nil, nil, nil, err
 		}
 		for _, item := range page.Items {
-			id, t, err := decode(item)
+			id := crdt.ICAO(attr(item, "icao"))
+			ords[id] = attr(item, "ord")
+			t, err := decode(item)
 			if err != nil {
-				bad++
+				bad = append(bad, id)
 				continue
 			}
-			out[id] = t
+			tracks[id] = t
 		}
 	}
-	return out, bad, nil
+	return tracks, ords, bad, nil
 }
 
-func decode(item map[string]types.AttributeValue) (crdt.ICAO, crdt.Track, error) {
-	str := func(k string) string {
-		if v, ok := item[k].(*types.AttributeValueMemberS); ok {
-			return v.Value
-		}
-		return ""
+// attr is a string attribute's value, or "" if it is missing or not a string.
+func attr(item map[string]types.AttributeValue, k string) string {
+	if v, ok := item[k].(*types.AttributeValueMemberS); ok {
+		return v.Value
 	}
+	return ""
+}
+
+func decode(item map[string]types.AttributeValue) (crdt.Track, error) {
 	var t crdt.Track
-	dec := json.NewDecoder(bytes.NewReader([]byte(str("t"))))
+	dec := json.NewDecoder(bytes.NewReader([]byte(attr(item, "t"))))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&t); err != nil {
-		return "", t, fmt.Errorf("track: %w", err)
+		return t, fmt.Errorf("track: %w", err)
 	}
-	if str("ord") != crdt.Ord(t) {
-		return "", t, errors.New("ord does not match the track")
+	if attr(item, "ord") != crdt.Ord(t) {
+		return t, errors.New("ord does not match the track")
 	}
-	return crdt.ICAO(str("icao")), t, nil
+	return t, nil
 }
 
 // save writes each changed track unless a greater one is already stored, and
 // returns how many writes won. Losing the condition is a lost merge, not an
 // error, including when the SDK retries a write that had in fact landed.
-func (p *peer) save(ctx context.Context, tracks map[crdt.ICAO]crdt.Track) (int, error) {
+// replace maps the aircraft whose stored item was bad to that item's ord.
+func (p *peer) save(ctx context.Context, tracks map[crdt.ICAO]crdt.Track, replace map[crdt.ICAO]string) (int, error) {
 	type job struct {
 		id crdt.ICAO
 		t  crdt.Track
@@ -155,7 +207,8 @@ func (p *peer) save(ctx context.Context, tracks map[crdt.ICAO]crdt.Track) (int, 
 	for range min(writers, len(tracks)) {
 		wg.Go(func() {
 			for j := range jobs {
-				ok, err := p.put(ctx, j.id, j.t)
+				badOrd, bad := replace[j.id]
+				ok, err := p.put(ctx, j.id, j.t, badOrd, bad)
 				mu.Lock()
 				if ok {
 					won++
@@ -175,13 +228,26 @@ func (p *peer) save(ctx context.Context, tracks map[crdt.ICAO]crdt.Track) (int, 
 	return won, errors.Join(errs...)
 }
 
-func (p *peer) put(ctx context.Context, id crdt.ICAO, t crdt.Track) (bool, error) {
+// put writes t if the stored track sorts below it. When this request found
+// the stored item bad, it may also replace exactly that item: by its ord if
+// it had one, or because it has none. If another invocation replaced it in
+// the meantime, the ordinary condition decides.
+func (p *peer) put(ctx context.Context, id crdt.ICAO, t crdt.Track, badOrd string, bad bool) (bool, error) {
 	body, err := json.Marshal(t)
 	if err != nil {
 		return false, err
 	}
 	ord := crdt.Ord(t)
 	expires := time.UnixMilli(t.TS.WallMS).Add(p.ttl).Unix() + 1
+	cond := "attribute_not_exists(icao) OR ord < :ord"
+	values := map[string]types.AttributeValue{":ord": &types.AttributeValueMemberS{Value: ord}}
+	switch {
+	case bad && badOrd != "":
+		cond += " OR ord = :bad"
+		values[":bad"] = &types.AttributeValueMemberS{Value: badOrd}
+	case bad:
+		cond += " OR attribute_not_exists(ord)"
+	}
 	_, err = p.db.PutItem(ctx, &dynamodb.PutItemInput{
 		TableName: &p.table,
 		Item: map[string]types.AttributeValue{
@@ -190,8 +256,8 @@ func (p *peer) put(ctx context.Context, id crdt.ICAO, t crdt.Track) (bool, error
 			"t":       &types.AttributeValueMemberS{Value: string(body)},
 			"expires": &types.AttributeValueMemberN{Value: strconv.FormatInt(expires, 10)},
 		},
-		ConditionExpression:       aws.String("attribute_not_exists(icao) OR ord < :ord"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{":ord": &types.AttributeValueMemberS{Value: ord}},
+		ConditionExpression:       aws.String(cond),
+		ExpressionAttributeValues: values,
 	})
 	var lost *types.ConditionalCheckFailedException
 	if errors.As(err, &lost) {

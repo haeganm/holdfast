@@ -51,6 +51,10 @@ type Record struct {
 	DelayMS int64  `json:"delay_ms,omitempty"`
 }
 
+// maxTraceMS bounds a record's time, a year, far inside what time.Duration
+// holds, so replay arithmetic can't overflow.
+const maxTraceMS = 365 * 24 * 3600 * 1000
+
 // MaxDelay bounds a recorded report's delivery delay: a position older than
 // adsb.MaxPositionAge is dropped at the source, plus room for feed lag.
 const MaxDelay = 2 * time.Minute
@@ -188,8 +192,8 @@ func Read(r io.Reader) ([]Record, error) {
 }
 
 func check(r Record) error {
-	if r.TMS < 0 {
-		return fmt.Errorf("negative t_ms %d", r.TMS)
+	if r.TMS < 0 || r.TMS > maxTraceMS {
+		return fmt.Errorf("t_ms %d: want 0 to %d", r.TMS, int64(maxTraceMS))
 	}
 	if !icaoRe.MatchString(r.ICAO) {
 		return fmt.Errorf("icao %q must be six uppercase hex digits", r.ICAO)
