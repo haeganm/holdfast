@@ -5,6 +5,8 @@
     python harness/run.py --family clock --repeats 5
     python harness/run.py --reanalyze results/<dir>   # recompute summary.csv from raw/
     python harness/run.py --smoke --obs           # same, with Prometheus and Grafana watching
+    python harness/run.py --family aws --duration 600   # live edges through the deployed cloud
+                                                  # peer: HOLDFAST_CLOUD_URL, HOLDFAST_CLOUD_TOKEN
     python harness/run.py --family real-hour --repeats 60   # the recorded hour, every minute of it
     python harness/run.py --family real-base --repeats 8    # baselines on 8 windows of it
     python harness/run.py --family cloud --repeats 5        # the cloud peer as the star's hub
@@ -168,6 +170,10 @@ def experiments(family: str) -> list[Config]:
     # The cloud relay against the registered star runs: same trace, same
     # scenarios, only the hub replaced.
     cloud = [Config("cloud", "cloud", s, "hlc", 0) for s in ("loss0", "loss20", "partition")]
+    # The deployed cloud peer (cloud/terraform), live traffic, edges that
+    # relay only through it. They reach it over the control network, which
+    # netem never touches, so the only impairment is the internet's own.
+    aws = [Config("aws", "aws", "loss0", "hlc", 0, "live")]
     # The recorded hour (predictions in docs/predictions-2.md). real-hour
     # replays every window of it under each condition the README names;
     # real-base runs the baselines on 8 windows spread across it.
@@ -179,7 +185,7 @@ def experiments(family: str) -> list[Config]:
                  # +4000: the trace's handoffs from c are the ones under 4 s
                  + [Config("real-base", "mesh", s, c, 4000, TRACE) for c in ("hlc", "wall")
                     for s in ("loss20", "partition")])
-    return {"sync": sync, "clock": clock, "live": live, "cloud": cloud, "real-hour": real_hour,
+    return {"sync": sync, "clock": clock, "live": live, "cloud": cloud, "aws": aws, "real-hour": real_hour,
             "real-base": real_base, "all": sync + clock}[family]
 
 
@@ -336,7 +342,7 @@ def load_raw(path: Path) -> Run:
 def peers(node: str, topology: str) -> str:
     if node in ("hub", "cloud"):
         return ""
-    others = {"mesh": [n for n in EDGES if n != node], "star": ["hub"], "cloud": []}[topology]  # cloud: CLOUD_PEER
+    others = {"mesh": [n for n in EDGES if n != node], "star": ["hub"], "cloud": [], "aws": []}[topology]  # CLOUD_PEER
     return ",".join(f"http://{IP[n]}:8080" for n in others)
 
 
@@ -356,6 +362,8 @@ def execute(run: Run, keep_obs: bool = False) -> None:
         # A fresh token, as Lambda requires, which the edges send through
         # -cloud-peer: every cloud run also tests the edges' side of auth.
         env |= {"CLOUD_PEER": f"http://{IP['cloud']}:8080", "CLOUD_TOKEN": secrets.token_hex(32)}
+    if cfg.topology == "aws":
+        env |= {"CLOUD_PEER": os.environ["HOLDFAST_CLOUD_URL"].rstrip("/"), "CLOUD_TOKEN": os.environ["HOLDFAST_CLOUD_TOKEN"]}
     auth = {"cloud": env.get("CLOUD_TOKEN", "")}
     services = list(run.nodes)
     teardown(env, keep_obs)
@@ -442,6 +450,14 @@ def execute(run: Run, keep_obs: bool = False) -> None:
                     run.extra["peer"] = json.load(r)
             except (OSError, urllib.error.URLError) as e:
                 run.errors.append(f"cloud peer counters: {e}")
+        if cfg.topology == "aws":
+            # Never polled during the run (every poll is an invocation and a
+            # table scan); asked once at the end whether its table matches.
+            try:
+                with urllib.request.urlopen(authorized(env["CLOUD_PEER"] + "/hash", env["CLOUD_TOKEN"]), timeout=10) as r:
+                    run.extra["cloud_hash"] = json.load(r)
+            except (OSError, urllib.error.URLError) as e:
+                run.errors.append(f"cloud hash: {e}")
     finally:
         teardown(env, keep_obs)
 
@@ -803,13 +819,19 @@ def analyze(run: Run, polls_path: Path) -> dict:
 
 
 def cloud_columns(run: Run, ingest: int) -> dict:
-    """The cloud peer's own counters for a run, and its writes per report."""
+    """The cloud peer's own counters for a run and its writes per report,
+    and for a deployed peer whether its table ended equal to the edges'."""
+    matches: bool | str = ""
+    if "cloud_hash" in run.extra and run.polls:
+        final = {run.polls[-1].states[n]["hash"] for n in EDGES}
+        matches = final == {run.extra["cloud_hash"]["hash"]}
     peer = run.extra.get("peer")
     if not peer:
-        return {"cloud_requests": "", "cloud_writes": "", "cloud_won": "", "cloud_failed": "", "cloud_writes_per_report": ""}
+        return {"cloud_requests": "", "cloud_writes": "", "cloud_won": "", "cloud_failed": "", "cloud_writes_per_report": "",
+                "cloud_matches": matches}
     return {"cloud_requests": peer["requests"], "cloud_writes": peer["writes"], "cloud_won": peer["won"],
             "cloud_failed": peer["failed"],
-            "cloud_writes_per_report": round(peer["writes"] / ingest, 3) if ingest else ""}
+            "cloud_writes_per_report": round(peer["writes"] / ingest, 3) if ingest else "", "cloud_matches": matches}
 
 
 def dirty(root: Path) -> bool:
@@ -857,6 +879,8 @@ def failures_of(row: dict, scenario: str, healed: bool) -> list[str]:
         out.append(row["run_id"] + " (never recovered)")
     if row["ingest_held"]:
         out.append(row["run_id"] + " (reports held at startup: the run measured the startup hold)")
+    if row["cloud_matches"] is False:
+        out.append(row["run_id"] + " (the cloud's table ended different from the edges')")
     return out
 
 
@@ -879,7 +903,7 @@ def main() -> int:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--smoke", action="store_true", help="three short runs (clean, partition, cloud); exit 1 unless all converge")
-    ap.add_argument("--family", choices=("sync", "clock", "live", "cloud", "real-hour", "real-base", "all"))
+    ap.add_argument("--family", choices=("sync", "clock", "live", "cloud", "aws", "real-hour", "real-base", "all"))
     ap.add_argument("--reanalyze", type=Path, metavar="DIR", help="recompute DIR/summary.csv from DIR/raw")
     ap.add_argument("--repeats", type=int, default=5)
     ap.add_argument("--duration", type=int, help="seconds of ingest (default 50, smoke 20)")
@@ -900,6 +924,8 @@ def main() -> int:
         return reanalyze(args.reanalyze)
 
     configs = SMOKE if args.smoke else experiments(args.family)
+    if args.family == "aws" and not (os.environ.get("HOLDFAST_CLOUD_URL") and os.environ.get("HOLDFAST_CLOUD_TOKEN")):
+        ap.error("--family aws needs HOLDFAST_CLOUD_URL (terraform output api_url) and HOLDFAST_CLOUD_TOKEN")
     if args.only:
         configs = [c for c in configs if re.search(args.only, c.run_id(0))]
         if not configs:

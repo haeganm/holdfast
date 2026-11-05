@@ -250,6 +250,22 @@ class LiveReceiptTest(unittest.TestCase):
         self.assertEqual(h.receipts(synthetic, T0), ({}, []))
 
 
+class AwsTest(unittest.TestCase):
+    def run_with_hashes(self, edges, cloud):
+        run = h.Run(h.Config("aws", "aws", "loss0", "hlc", 0, "live"), 0, 1000, 0)
+        run.polls = [poll(1000, **{n: state(1000, {}, hash_=x) for n, x in zip(h.EDGES, edges)})]
+        run.extra["cloud_hash"] = {"hash": cloud, "n": 0}
+        return h.cloud_columns(run, 10)["cloud_matches"]
+
+    def test_the_deployed_peer_is_never_polled_and_must_end_equal(self):
+        run = h.Run(h.Config("aws", "aws", "loss0", "hlc", 0, "live"), 0, 1000, 0)
+        self.assertEqual(run.nodes, h.EDGES)
+        self.assertEqual(h.peers("a", "aws"), "")
+        self.assertIs(self.run_with_hashes(["x", "x", "x"], "x"), True)
+        self.assertIs(self.run_with_hashes(["x", "x", "x"], "y"), False)
+        self.assertIs(self.run_with_hashes(["x", "x", "z"], "x"), False)
+
+
 class CommitLabelTest(unittest.TestCase):
     def test_only_source_changes_make_a_checkout_dirty(self):
         with tempfile.TemporaryDirectory() as d:

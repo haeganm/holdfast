@@ -37,14 +37,17 @@ variable "budget_usd" {
   default = "5"
 }
 
+# Three edges syncing every second make 3 to 6 requests a second. The
+# throttle is there to cap what a stranger with the URL can run up, not to
+# slow the edges down.
 variable "burst" {
   type    = number
-  default = 10
+  default = 20
 }
 
 variable "rate" {
   type    = number
-  default = 5
+  default = 10
 }
 
 variable "bootstrap_path" {
