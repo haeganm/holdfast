@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -249,15 +250,62 @@ func TestParseKeepsTheSameDuplicateWhateverTheOrder(t *testing.T) {
 	}
 }
 
+// Retry-After comes in seconds or as an HTTP date (RFC 9110), and the feed is
+// untrusted, so one header can't keep a sensor quiet for longer than
+// maxRetryAfter.
 func TestPollReadsRetryAfter(t *testing.T) {
+	now := time.Date(2026, 11, 5, 18, 0, 0, 0, time.UTC)
+	for header, want := range map[string]time.Duration{
+		"7":     7 * time.Second,
+		"-3":    0,
+		"86400": maxRetryAfter,
+		"soon":  0,
+		now.Add(2 * time.Minute).Format(http.TimeFormat): 2 * time.Minute,
+		now.Add(time.Hour).Format(http.TimeFormat):       maxRetryAfter,
+		now.Add(-time.Hour).Format(http.TimeFormat):      0,
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Retry-After", header)
+			w.WriteHeader(http.StatusTooManyRequests)
+		}))
+		_, err := Feed{URL: srv.URL, Client: srv.Client(), Now: func() time.Time { return now }}.Poll(context.Background())
+		srv.Close()
+		var busy *busyError
+		if !errors.As(err, &busy) || busy.retryAfter != want {
+			t.Errorf("Retry-After %q: err %v, want a refusal asking for %v", header, err, want)
+		}
+	}
+}
+
+// Every failed poll backs off, not just a refusal: a garbage 200 or a 403
+// polled at the normal interval forever would hammer a feed that is already
+// failing. The error says when the next poll comes, so the log shows how
+// long the sensor will be quiet.
+func TestEveryFailedPollBacksOffAndSaysForHowLong(t *testing.T) {
+	const now = 1_700_000_000_000
+	_, failures, _ := follow(t, "403", "<html>busy</html>", `{"now":`, one(now, 39.0, 0.5), "429")
+	var got []string
+	for _, err := range failures {
+		_, wait, _ := strings.Cut(err.Error(), "; next poll in ")
+		got = append(got, wait)
+	}
+	// follow polls every 1 ms; a success resets the wait.
+	if want := []string{"2ms", "4ms", "8ms", "2ms"}; !slices.Equal(got, want) {
+		t.Fatalf("waits after each failure %q, want %q: %v", got, want, failures)
+	}
+}
+
+func TestTheFirstPollGoesAtOnce(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Retry-After", "7")
-		w.WriteHeader(http.StatusTooManyRequests)
+		fmt.Fprintf(w, `{"now":%d,"ac":[]}`, time.Now().UnixMilli())
 	}))
 	defer srv.Close()
-	_, err := Feed{URL: srv.URL, Client: srv.Client(), Now: time.Now}.Poll(context.Background())
-	var busy *busyError
-	if !errors.As(err, &busy) || busy.retryAfter != 7*time.Second {
-		t.Fatalf("err %v, want a refusal asking for 7 s", err)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	polled := false
+	Feed{URL: srv.URL, Every: time.Hour, MaxSkew: 30 * time.Second, Client: srv.Client(), Now: time.Now}.
+		Follow(ctx, func([]Report) { polled = true; cancel() }, func(err error) { t.Error(err) })
+	if !polled {
+		t.Fatal("Follow waited a whole interval before its first poll")
 	}
 }

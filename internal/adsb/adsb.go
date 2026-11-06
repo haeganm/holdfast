@@ -161,28 +161,49 @@ type Feed struct {
 	Agent   string // User-Agent; public feeds ask clients to identify themselves
 }
 
-// maxBackoff caps the wait after a refusal. Several pollers sharing one
+// maxBackoff caps the wait after a failed poll. Several pollers sharing one
 // feed's allowance must not starve each other by backing off for minutes.
 const maxBackoff = 30 * time.Second
 
-// backoff is the wait after a refusal: the last wait doubled, up to
+// maxRetryAfter caps the wait a refusal's Retry-After can ask for. It is
+// longer than any rate limit's window, but the feed is untrusted, and one
+// header must not silence a sensor for a day.
+const maxRetryAfter = 5 * time.Minute
+
+// backoff is the wait after a failed poll: the last wait doubled, up to
 // maxBackoff, but never shorter than the normal interval or than what the
 // feed asked for in Retry-After.
 func backoff(last, every, retryAfter time.Duration) time.Duration {
 	return max(min(2*last, maxBackoff), every, retryAfter)
 }
 
-// Follow polls the feed until ctx is done and calls got with every
-// successful response. fail is called for every failed poll. After a
-// refusal or a server error the wait backs off (see backoff).
+// Follow polls the feed until ctx is done, the first time at once, and calls
+// got with every successful response. fail is called for every failed poll,
+// with how long until the next one: after any failure the wait backs off
+// (see backoff).
 func (f Feed) Follow(ctx context.Context, got func([]Report), fail func(error)) {
 	if f.Every <= 0 {
 		fail(fmt.Errorf("poll interval %v: must be positive", f.Every))
 		return
 	}
 	wait := f.Every
-	next := time.Now()
-	for {
+	for next := time.Now(); ; {
+		reports, err := f.Poll(ctx)
+		var busy *busyError
+		switch {
+		case err == nil:
+			wait = f.Every
+			got(reports)
+		case ctx.Err() != nil:
+			return
+		case errors.As(err, &busy):
+			wait = backoff(wait, f.Every, busy.retryAfter)
+		default:
+			wait = backoff(wait, f.Every, 0)
+		}
+		if err != nil {
+			fail(fmt.Errorf("%w; next poll in %v", err, wait))
+		}
 		// A fixed start-to-start schedule, so a slow response doesn't
 		// stretch the interval; a poll that overran its slot goes at once.
 		next = next.Add(wait)
@@ -196,20 +217,6 @@ func (f Feed) Follow(ctx context.Context, got func([]Report), fail func(error)) 
 			return
 		} else {
 			next = time.Now()
-		}
-		reports, err := f.Poll(ctx)
-		var busy *busyError
-		switch {
-		case errors.As(err, &busy):
-			fail(err)
-			wait = backoff(wait, f.Every, busy.retryAfter)
-		case err != nil:
-			if ctx.Err() == nil {
-				fail(err)
-			}
-		default:
-			wait = f.Every
-			got(reports)
 		}
 	}
 }
@@ -252,6 +259,18 @@ type busyError struct {
 
 func (e *busyError) Error() string { return "feed is refusing requests: " + e.status }
 
+// retryAfter reads a Retry-After header, in seconds or as an HTTP date, as a
+// wait from now of 0 to maxRetryAfter.
+func retryAfter(h string, now time.Time) time.Duration {
+	if s, err := strconv.Atoi(h); err == nil {
+		return time.Duration(min(max(s, 0), int(maxRetryAfter/time.Second))) * time.Second
+	}
+	if at, err := http.ParseTime(h); err == nil {
+		return min(max(at.Sub(now), 0), maxRetryAfter)
+	}
+	return 0
+}
+
 // Poll makes one request.
 func (f Feed) Poll(ctx context.Context) ([]Report, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.URL, nil)
@@ -269,8 +288,7 @@ func (f Feed) Poll(ctx context.Context) ([]Report, error) {
 		return nil, err
 	}
 	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
-		retry, _ := strconv.Atoi(resp.Header.Get("Retry-After"))
-		return nil, &busyError{resp.Status, time.Duration(max(0, retry)) * time.Second}
+		return nil, &busyError{resp.Status, retryAfter(resp.Header.Get("Retry-After"), f.Now())}
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%s: %s", f.URL, resp.Status)
