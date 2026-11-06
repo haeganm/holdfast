@@ -34,35 +34,42 @@ import (
 )
 
 func main() {
-	if err := run(); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	err := run(ctx, os.Args[1:])
+	stop()
+	if err != nil && !errors.Is(err, flag.ErrHelp) {
 		fmt.Fprintln(os.Stderr, "holdfast:", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
+// run starts the node and serves until ctx is done.
+func run(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("holdfast", flag.ContinueOnError)
 	var (
-		id       = flag.String("id", "", "node id, also the origin of its writes (required)")
-		listen   = flag.String("listen", ":8080", "listen address")
-		peers    = flag.String("peers", "", "comma-separated peer base URLs")
-		cloud    = flag.String("cloud-peer", "", "base URL of a cloud peer, which alone gets the token in HOLDFAST_CLOUD_TOKEN; https, or http to a private IP")
-		interval = flag.Duration("sync-interval", time.Second, "sync period per peer")
-		timeout  = flag.Duration("sync-timeout", 2*time.Second, "client timeout per sync request")
-		clock    = flag.String("clock", "hlc", "hlc, or wall for the wall-clock baseline")
-		offsetMS = flag.Int("clock-offset-ms", 0, "skew this node's physical clock (experiments)")
-		maxDrift = flag.Duration("max-drift", 5*time.Second, "reject remote stamps further ahead than this")
-		ttl      = flag.Duration("track-ttl", 5*time.Minute, "drop an aircraft whose track is older than this; negative keeps everything")
-		hold     = flag.Duration("startup-hold", 0, "hold own reports this long after start, so a restart can't reuse old stamps; 0 means the max drift, negative none")
-		trace    = flag.String("trace", "", "trace to replay (.jsonl or .jsonl.gz); empty means no local ingest")
-		from     = flag.Int64("trace-from-ms", 0, "replay the trace from this t_ms, shifted to start at 0")
-		live     = flag.String("live-url", "", "ingest live from a readsb-format feed instead; the coverage's lat/lon/radius_nm is appended")
-		every    = flag.Duration("live-interval", 3*time.Second, "how often to poll the live feed")
-		offset   = flag.Duration("live-offset", 0, "wait this long before the first poll, to spread several nodes' polls")
-		coverage = flag.String("coverage", "", "lat,lon,radius_km of the reports this node receives")
-		t0       = flag.Int64("t0", 0, "unix ms at which ingest starts; 0 means 2 s from now")
-		traceMS  = flag.Int64("trace-ms", 0, "ingest this many ms (of the trace, or live); 0 means all")
+		id       = fs.String("id", "", "node id, also the origin of its writes (required)")
+		listen   = fs.String("listen", ":8080", "listen address")
+		peers    = fs.String("peers", "", "comma-separated peer base URLs")
+		cloud    = fs.String("cloud-peer", "", "base URL of a cloud peer, which alone gets the token in HOLDFAST_CLOUD_TOKEN; https, or http to a private IP")
+		interval = fs.Duration("sync-interval", time.Second, "sync period per peer")
+		timeout  = fs.Duration("sync-timeout", 2*time.Second, "client timeout per sync request")
+		clock    = fs.String("clock", "hlc", "hlc, or wall for the wall-clock baseline")
+		offsetMS = fs.Int("clock-offset-ms", 0, "skew this node's physical clock (experiments)")
+		maxDrift = fs.Duration("max-drift", 5*time.Second, "reject remote stamps further ahead than this")
+		ttl      = fs.Duration("track-ttl", 5*time.Minute, "drop an aircraft whose track is older than this; negative keeps everything")
+		hold     = fs.Duration("startup-hold", 0, "hold own reports this long after start, so a restart can't reuse old stamps; 0 means the max drift, negative none")
+		trace    = fs.String("trace", "", "trace to replay (.jsonl or .jsonl.gz); empty means no local ingest")
+		from     = fs.Int64("trace-from-ms", 0, "replay the trace from this t_ms, shifted to start at 0")
+		live     = fs.String("live-url", "", "ingest live from a readsb-format feed instead; the coverage's lat/lon/radius_nm is appended")
+		every    = fs.Duration("live-interval", 3*time.Second, "how often to poll the live feed")
+		offset   = fs.Duration("live-offset", 0, "wait this long before the first poll, to spread several nodes' polls")
+		coverage = fs.String("coverage", "", "lat,lon,radius_km of the reports this node receives")
+		t0       = fs.Int64("t0", 0, "unix ms at which ingest starts; 0 means 2 s from now")
+		traceMS  = fs.Int64("trace-ms", 0, "ingest this many ms (of the trace, or live); 0 means all")
 	)
-	flag.Parse()
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 	if *clock != "hlc" && *clock != "wall" {
 		return fmt.Errorf("-clock %q: want hlc or wall", *clock)
 	}
@@ -136,9 +143,6 @@ func run() error {
 			}
 		}
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	srv := &http.Server{
 		Addr:              *listen,
