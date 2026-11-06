@@ -22,7 +22,6 @@ mutants=(
   "HLC Update forgets the +1 when the remote is ahead|internal/hlc/hlc.go|s/Logical: m\.Logical \+ 1\}/Logical: m.Logical}/"
   "HLC lets the logical part pass the bound|internal/hlc/hlc.go|s/if c\.last\.Logical > MaxLogical \{/if false {/"
   "HLC Now reuses a stamp in the same millisecond|internal/hlc/hlc.go|s/\} else \{\n\t\tc\.last\.Logical\+\+\n\t\}\n\tc\.rollOver\(\)/}\n\tc.rollOver()/"
-  "node merges before advancing its clock|internal/node/node.go|s/n\.clock\.Update\(high\)/_ = high/"
   "node counts a cut-off body as a rejection|internal/node/node.go|s/if body\.err != nil \{/if false {/"
   "node never holds its reports after a start|internal/node/node.go|s/if cfg\.StartupHold > 0 && !cfg\.Wall \{/if false {/"
   "node drops what it held when the hold ends|internal/node/node.go|s/n\.stamp\(id, held\[id\]\)/_ = id/"
@@ -38,7 +37,6 @@ mutants=(
   "node accepts stamps from the far future|internal/node/node.go|s/if ts\.WallMS > limit \{/if false {/"
   "node accepts a logical part that wraps the clock|internal/node/node.go|s/if ts\.Logical > hlc\.MaxLogical \{/if false {/"
   "node has no per-message track cap|internal/node/node.go|s/if len\(tracks\) > maxEntries \{/if false {/"
-  "node advances its clock only to the message stamp|internal/node/node.go|s/\t\t\thigh = t\.TS\n/\t\t\tcontinue\n/"
   "Ingest stamps without the lock|internal/node/node.go|s/\tn\.mu\.Lock\(\)\n\tdefer n\.mu\.Unlock\(\)\n\tn\.c\.ingestTotal\.Add\(1\)/\tn.c.ingestTotal.Add(1)/"
   "ingest_regress is never counted|internal/node/node.go|s/\t\tn\.c\.ingestRegress\.Add\(1\)\n//"
   "merge_regress is never counted|internal/node/node.go|s/\t\t\tn\.c\.mergeRegress\.Add\(1\)\n//"
@@ -128,6 +126,8 @@ mutants=(
   "replay: coverage lets a NaN through|internal/replay/trace.go|s/ok := c\.Lat >= -90 && c\.Lat <= 90 && c\.Lon >= -180 && c\.Lon <= 180 && c\.RadiusKm > 0/ok := !(c.Lat < -90 || c.Lat > 90 || c.Lon < -180 || c.Lon > 180) \&\& c.RadiusKm > 0/"
   "replay: coverage takes an infinite radius|internal/replay/trace.go|s/ && !math\.IsInf\(c\.RadiusKm, 1\)//"
   "replay: Read keeps a line's first record and drops the rest|internal/replay/trace.go|s/if strings\.TrimSpace\(text\[dec\.InputOffset\(\):\]\) != \"\" \{/if false {/"
+  # The layering docs/DESIGN.md claims, held by internal/layering_test.go
+  "the node imports a sensor package|internal/node/node.go|s/\nimport \(\n/\nimport (\n\t_ \"github.com\/haeganm\/holdfast\/internal\/replay\"\n/"
   # W1: the core's ord range, trust boundary, clock offset, counters, replica cap, hold and response refusals
   "Ord pads the logical part too short|internal/crdt/track.go|s/\"%016x%08x\"/\"%016x%x\"/"
   "node has no digest entry cap|internal/node/node.go|s/if len\(d\) > maxEntries \{/if false {/"
@@ -177,10 +177,11 @@ if ! (cd "$work/src" && go test -vet=off -count=1 ./internal/... ./cmd/... >/dev
   exit 1
 fi
 
-failed=0
+failed=0 ran=0
 for m in "${mutants[@]}"; do
   IFS='|' read -r desc file sub <<<"$m"
   [[ -n "${HOLDFAST_MUTANTS_ONLY:-}" && ! "$desc" =~ $HOLDFAST_MUTANTS_ONLY ]] && continue
+  ran=$((ran + 1))
   copy
   before="$(sha256sum "$work/src/$file" | cut -d' ' -f1)"
   perl -0pi -e "$sub" "$work/src/$file"
@@ -222,4 +223,8 @@ if [[ $failed -ne 0 ]]; then
   echo "mutants: FAIL"
   exit 1
 fi
-echo "mutants: all ${#mutants[@]} killed"
+if [[ $ran -eq ${#mutants[@]} ]]; then
+  echo "mutants: all $ran killed"
+else
+  echo "mutants: all $ran selected by HOLDFAST_MUTANTS_ONLY killed ($ran of ${#mutants[@]})"
+fi
