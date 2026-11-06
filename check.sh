@@ -32,6 +32,13 @@ if git ls-files --eol | grep -E 'i/(crlf|mixed)' >&2; then
   fail "CRLF in the index; scripts with CRLF break inside the containers"
 fi
 
+step "every image is pinned to one digest, wherever it is named"
+# Dependabot can't see the pins in this file or in scripts/lambda_smoke.py, so a
+# bump elsewhere would leave the gate testing one image and the harness running another.
+split="$(git grep -h -o -E '[a-z0-9./_-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}' -- . ':!results' ':!*.md' \
+  | sed -E 's/:[A-Za-z0-9._-]+@/@/' | sort -u | cut -d@ -f1 | uniq -d)"
+[[ -z "$split" ]] || fail "pinned to more than one digest: $split"
+
 step "gofmt (both modules)"
 unformatted="$(gofmt -l .)"
 [[ -z "$unformatted" ]] || fail "gofmt needed: $unformatted"

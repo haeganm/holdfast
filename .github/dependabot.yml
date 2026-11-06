@@ -6,15 +6,24 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly }
+  # Both images, in one PR: the edge and the cloud peer must build from the
+  # same golang and debian. check.sh and scripts/lambda_smoke.py repeat some of
+  # these pins where Dependabot can't see them; the gate fails until they match.
   - package-ecosystem: docker
-    directory: /harness
+    directories: [/harness, /cloud]
     schedule: { interval: weekly }
+    groups:
+      base-images:
+        patterns: ["*"]
   - package-ecosystem: pip
     directory: /harness
     schedule: { interval: weekly }
   - package-ecosystem: gomod
     directory: /cloud
     schedule: { interval: weekly }
+    groups:
+      aws-sdk:
+        patterns: ["github.com/aws/*"]
   - package-ecosystem: terraform
     directory: /cloud/terraform
     schedule: { interval: weekly }
