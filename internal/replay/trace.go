@@ -278,9 +278,13 @@ func DistanceKm(lat1, lon1, lat2, lon2 float64) float64 {
 }
 
 // Play calls emit for each record at start plus its t_ms, in order, until the
-// records run out or ctx is done. Records already due are emitted at once.
+// records run out or ctx is done. Records already due are emitted at once,
+// unless ctx is done.
 func Play(ctx context.Context, recs []Record, start time.Time, emit func(Record)) error {
 	for _, r := range recs {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if d := time.Until(start.Add(time.Duration(r.TMS) * time.Millisecond)); d > 0 {
 			t := time.NewTimer(d)
 			select {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"math"
 	"os"
 	"path/filepath"
@@ -191,12 +192,14 @@ func TestPlayEmitsOnScheduleAndStops(t *testing.T) {
 	if at[2] < 60*time.Millisecond {
 		t.Fatalf("last record emitted after %v, before its 60 ms schedule", at[2])
 	}
+}
 
+func TestPlayStopsOnACancelledContextEvenForRecordsAlreadyDue(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	n := 0
-	err := Play(ctx, []Record{{TMS: 0}, {TMS: 60_000}}, time.Now(), func(Record) { n++ })
-	if err == nil || n != 1 {
-		t.Fatalf("after cancel: err=%v emitted=%d, want an error after the one record already due", err, n)
+	err := Play(ctx, []Record{{TMS: 0}, {TMS: 1}, {TMS: 2}}, time.Now().Add(-time.Hour), func(Record) { n++ })
+	if !errors.Is(err, context.Canceled) || n != 0 {
+		t.Fatalf("err=%v emitted=%d, want context.Canceled and nothing emitted", err, n)
 	}
 }
