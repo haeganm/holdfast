@@ -5,3 +5,4 @@
 crash.log
 *.tfvars
 build/
+*.tfplan
