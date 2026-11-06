@@ -97,6 +97,11 @@ run "logs_expire_after_a_week" {
     condition     = aws_cloudwatch_log_group.peer.retention_in_days == 7
     error_message = "retention must be 7 days"
   }
+
+  assert {
+    condition     = aws_cloudwatch_log_group.access.retention_in_days == 7
+    error_message = "access log retention must be 7 days"
+  }
 }
 
 run "stage_throttling_uses_variables" {
