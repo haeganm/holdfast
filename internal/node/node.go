@@ -597,9 +597,9 @@ func (n *Node) post(ctx context.Context, url string, in, out any) error {
 		// it, so like a cut-off request it is not a rejection.
 		return fmt.Errorf("read response from %s: %w", url, err)
 	}
-	// The whole body arrived, so a response refused for its size or contents
-	// is a bad message, counted as a request's would be. A status that isn't
-	// 2xx is the peer refusing this node, not the other way round.
+	// Nothing cut this response off, so one refused for its size or its
+	// contents is a bad message, counted as a request's would be. A status
+	// that isn't 2xx is the peer refusing this node, not the other way round.
 	if len(data) > maxBody {
 		n.c.rejected.Add(1)
 		return fmt.Errorf("response from %s exceeds %d bytes", url, maxBody)
