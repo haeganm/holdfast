@@ -1,0 +1,18 @@
+== apply 2026-11-06T06:11:54Z
+api_url = "https://<api-id>.execute-api.us-east-1.amazonaws.com/"
+function_name = "holdfast-peer"
+log_group = "/aws/lambda/holdfast-peer"
+table_name = "holdfast-tracks"
+== a tokenless request must be refused
+401
+== run 2026-11-06T06:13:25Z
+building holdfast:dev at 6f22fcb
+[1/1] aws-aws-loss0-hlc-skew0-r0: settled=True settle_ms=71 recover_p95/all=/ prop_p50/p95=1307/2112 ingest_lost=0 regress=0 err_rate=0.0006 wire_B/obs= (626s)
+wrote results\aws\summary.csv
+== copy the Lambda's logs before the stack goes
+7030 log events copied
+== destroy 2026-11-06T06:25:27Z
+aws_dynamodb_table.tracks: Destruction complete after 7s
+
+Destroy complete! Resources: 12 destroyed.
+destroyed

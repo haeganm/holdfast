@@ -1,0 +1,651 @@
+{
+"lambda_Invocations": {
+    "Label": "Invocations",
+    "Datapoints": [
+        {
+            "Timestamp": "2026-11-05T22:13:00-08:00",
+            "Sum": 1.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:22:00-08:00",
+            "Sum": 171.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:14:00-08:00",
+            "Sum": 3.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:23:00-08:00",
+            "Sum": 172.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:15:00-08:00",
+            "Sum": 164.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:24:00-08:00",
+            "Sum": 172.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:16:00-08:00",
+            "Sum": 171.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:25:00-08:00",
+            "Sum": 48.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:17:00-08:00",
+            "Sum": 170.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:18:00-08:00",
+            "Sum": 171.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:19:00-08:00",
+            "Sum": 171.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:20:00-08:00",
+            "Sum": 172.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:21:00-08:00",
+            "Sum": 172.0,
+            "Unit": "Count"
+        }
+    ]
+},
+"lambda_Errors": {
+    "Label": "Errors",
+    "Datapoints": [
+        {
+            "Timestamp": "2026-11-05T22:13:00-08:00",
+            "Sum": 0.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:22:00-08:00",
+            "Sum": 0.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:14:00-08:00",
+            "Sum": 0.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:23:00-08:00",
+            "Sum": 0.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:15:00-08:00",
+            "Sum": 0.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:24:00-08:00",
+            "Sum": 0.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:16:00-08:00",
+            "Sum": 0.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:25:00-08:00",
+            "Sum": 0.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:17:00-08:00",
+            "Sum": 0.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:18:00-08:00",
+            "Sum": 0.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:19:00-08:00",
+            "Sum": 0.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:20:00-08:00",
+            "Sum": 0.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:21:00-08:00",
+            "Sum": 0.0,
+            "Unit": "Count"
+        }
+    ]
+},
+"lambda_Throttles": {
+    "Label": "Throttles",
+    "Datapoints": [
+        {
+            "Timestamp": "2026-11-05T22:13:00-08:00",
+            "Sum": 0.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:22:00-08:00",
+            "Sum": 0.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:14:00-08:00",
+            "Sum": 0.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:23:00-08:00",
+            "Sum": 0.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:15:00-08:00",
+            "Sum": 0.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:24:00-08:00",
+            "Sum": 0.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:16:00-08:00",
+            "Sum": 0.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:25:00-08:00",
+            "Sum": 0.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:17:00-08:00",
+            "Sum": 0.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:18:00-08:00",
+            "Sum": 0.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:19:00-08:00",
+            "Sum": 0.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:20:00-08:00",
+            "Sum": 0.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:21:00-08:00",
+            "Sum": 0.0,
+            "Unit": "Count"
+        }
+    ]
+},
+"lambda_ConcurrentExecutions": {
+    "Label": "ConcurrentExecutions",
+    "Datapoints": [
+        {
+            "Timestamp": "2026-11-05T22:13:00-08:00",
+            "Maximum": 1.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:22:00-08:00",
+            "Maximum": 2.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:14:00-08:00",
+            "Maximum": 3.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:23:00-08:00",
+            "Maximum": 1.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:15:00-08:00",
+            "Maximum": 2.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:24:00-08:00",
+            "Maximum": 1.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:16:00-08:00",
+            "Maximum": 2.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:25:00-08:00",
+            "Maximum": 2.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:17:00-08:00",
+            "Maximum": 2.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:18:00-08:00",
+            "Maximum": 2.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:19:00-08:00",
+            "Maximum": 2.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:20:00-08:00",
+            "Maximum": 2.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:21:00-08:00",
+            "Maximum": 2.0,
+            "Unit": "Count"
+        }
+    ]
+},
+"api_Count": {
+    "Label": "Count",
+    "Datapoints": [
+        {
+            "Timestamp": "2026-11-05T22:19:00-08:00",
+            "Sum": 171.0,
+            "Unit": "None"
+        },
+        {
+            "Timestamp": "2026-11-05T22:18:00-08:00",
+            "Sum": 171.0,
+            "Unit": "None"
+        },
+        {
+            "Timestamp": "2026-11-05T22:17:00-08:00",
+            "Sum": 170.0,
+            "Unit": "None"
+        },
+        {
+            "Timestamp": "2026-11-05T22:21:00-08:00",
+            "Sum": 172.0,
+            "Unit": "None"
+        },
+        {
+            "Timestamp": "2026-11-05T22:20:00-08:00",
+            "Sum": 172.0,
+            "Unit": "None"
+        },
+        {
+            "Timestamp": "2026-11-05T22:23:00-08:00",
+            "Sum": 172.0,
+            "Unit": "None"
+        },
+        {
+            "Timestamp": "2026-11-05T22:14:00-08:00",
+            "Sum": 3.0,
+            "Unit": "None"
+        },
+        {
+            "Timestamp": "2026-11-05T22:13:00-08:00",
+            "Sum": 1.0,
+            "Unit": "None"
+        },
+        {
+            "Timestamp": "2026-11-05T22:22:00-08:00",
+            "Sum": 171.0,
+            "Unit": "None"
+        },
+        {
+            "Timestamp": "2026-11-05T22:25:00-08:00",
+            "Sum": 48.0,
+            "Unit": "None"
+        },
+        {
+            "Timestamp": "2026-11-05T22:16:00-08:00",
+            "Sum": 171.0,
+            "Unit": "None"
+        },
+        {
+            "Timestamp": "2026-11-05T22:24:00-08:00",
+            "Sum": 172.0,
+            "Unit": "None"
+        },
+        {
+            "Timestamp": "2026-11-05T22:15:00-08:00",
+            "Sum": 164.0,
+            "Unit": "None"
+        }
+    ]
+},
+"api_4xx": {
+    "Label": "4xx",
+    "Datapoints": [
+        {
+            "Timestamp": "2026-11-05T22:19:00-08:00",
+            "Sum": 0.0,
+            "Unit": "None"
+        },
+        {
+            "Timestamp": "2026-11-05T22:18:00-08:00",
+            "Sum": 0.0,
+            "Unit": "None"
+        },
+        {
+            "Timestamp": "2026-11-05T22:17:00-08:00",
+            "Sum": 0.0,
+            "Unit": "None"
+        },
+        {
+            "Timestamp": "2026-11-05T22:21:00-08:00",
+            "Sum": 0.0,
+            "Unit": "None"
+        },
+        {
+            "Timestamp": "2026-11-05T22:20:00-08:00",
+            "Sum": 0.0,
+            "Unit": "None"
+        },
+        {
+            "Timestamp": "2026-11-05T22:23:00-08:00",
+            "Sum": 0.0,
+            "Unit": "None"
+        },
+        {
+            "Timestamp": "2026-11-05T22:14:00-08:00",
+            "Sum": 0.0,
+            "Unit": "None"
+        },
+        {
+            "Timestamp": "2026-11-05T22:13:00-08:00",
+            "Sum": 1.0,
+            "Unit": "None"
+        },
+        {
+            "Timestamp": "2026-11-05T22:22:00-08:00",
+            "Sum": 0.0,
+            "Unit": "None"
+        },
+        {
+            "Timestamp": "2026-11-05T22:25:00-08:00",
+            "Sum": 0.0,
+            "Unit": "None"
+        },
+        {
+            "Timestamp": "2026-11-05T22:16:00-08:00",
+            "Sum": 0.0,
+            "Unit": "None"
+        },
+        {
+            "Timestamp": "2026-11-05T22:24:00-08:00",
+            "Sum": 0.0,
+            "Unit": "None"
+        },
+        {
+            "Timestamp": "2026-11-05T22:15:00-08:00",
+            "Sum": 0.0,
+            "Unit": "None"
+        }
+    ]
+},
+"api_5xx": {
+    "Label": "5xx",
+    "Datapoints": [
+        {
+            "Timestamp": "2026-11-05T22:19:00-08:00",
+            "Sum": 0.0,
+            "Unit": "None"
+        },
+        {
+            "Timestamp": "2026-11-05T22:18:00-08:00",
+            "Sum": 0.0,
+            "Unit": "None"
+        },
+        {
+            "Timestamp": "2026-11-05T22:17:00-08:00",
+            "Sum": 0.0,
+            "Unit": "None"
+        },
+        {
+            "Timestamp": "2026-11-05T22:21:00-08:00",
+            "Sum": 0.0,
+            "Unit": "None"
+        },
+        {
+            "Timestamp": "2026-11-05T22:20:00-08:00",
+            "Sum": 0.0,
+            "Unit": "None"
+        },
+        {
+            "Timestamp": "2026-11-05T22:23:00-08:00",
+            "Sum": 0.0,
+            "Unit": "None"
+        },
+        {
+            "Timestamp": "2026-11-05T22:14:00-08:00",
+            "Sum": 0.0,
+            "Unit": "None"
+        },
+        {
+            "Timestamp": "2026-11-05T22:13:00-08:00",
+            "Sum": 0.0,
+            "Unit": "None"
+        },
+        {
+            "Timestamp": "2026-11-05T22:22:00-08:00",
+            "Sum": 0.0,
+            "Unit": "None"
+        },
+        {
+            "Timestamp": "2026-11-05T22:25:00-08:00",
+            "Sum": 0.0,
+            "Unit": "None"
+        },
+        {
+            "Timestamp": "2026-11-05T22:16:00-08:00",
+            "Sum": 0.0,
+            "Unit": "None"
+        },
+        {
+            "Timestamp": "2026-11-05T22:24:00-08:00",
+            "Sum": 0.0,
+            "Unit": "None"
+        },
+        {
+            "Timestamp": "2026-11-05T22:15:00-08:00",
+            "Sum": 0.0,
+            "Unit": "None"
+        }
+    ]
+},
+"ddb_ConsumedReadCapacityUnits": {
+    "Label": "ConsumedReadCapacityUnits",
+    "Datapoints": [
+        {
+            "Timestamp": "2026-11-05T22:13:00-08:00",
+            "Sum": 0.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:22:00-08:00",
+            "Sum": 684.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:14:00-08:00",
+            "Sum": 4.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:23:00-08:00",
+            "Sum": 688.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:15:00-08:00",
+            "Sum": 664.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:24:00-08:00",
+            "Sum": 688.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:16:00-08:00",
+            "Sum": 684.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:25:00-08:00",
+            "Sum": 192.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:17:00-08:00",
+            "Sum": 680.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:18:00-08:00",
+            "Sum": 684.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:19:00-08:00",
+            "Sum": 684.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:20:00-08:00",
+            "Sum": 688.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:12:00-08:00",
+            "Sum": 0.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:21:00-08:00",
+            "Sum": 688.0,
+            "Unit": "Count"
+        }
+    ]
+},
+"ddb_ConsumedWriteCapacityUnits": {
+    "Label": "ConsumedWriteCapacityUnits",
+    "Datapoints": [
+        {
+            "Timestamp": "2026-11-05T22:13:00-08:00",
+            "Sum": 0.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:22:00-08:00",
+            "Sum": 45.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:14:00-08:00",
+            "Sum": 0.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:23:00-08:00",
+            "Sum": 37.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:15:00-08:00",
+            "Sum": 29.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:24:00-08:00",
+            "Sum": 36.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:16:00-08:00",
+            "Sum": 51.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:25:00-08:00",
+            "Sum": 6.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:17:00-08:00",
+            "Sum": 38.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:18:00-08:00",
+            "Sum": 44.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:19:00-08:00",
+            "Sum": 48.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:20:00-08:00",
+            "Sum": 43.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:12:00-08:00",
+            "Sum": 0.0,
+            "Unit": "Count"
+        },
+        {
+            "Timestamp": "2026-11-05T22:21:00-08:00",
+            "Sum": 37.0,
+            "Unit": "Count"
+        }
+    ]
+},
+"ddb_ReadThrottleEvents": {
+    "Label": "ReadThrottleEvents",
+    "Datapoints": []
+},
+"ddb_WriteThrottleEvents": {
+    "Label": "WriteThrottleEvents",
+    "Datapoints": []
+},
+"window": ["2026-11-06T06:12:25Z", "2026-11-06T06:27:23Z"]
+}

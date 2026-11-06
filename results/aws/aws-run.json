@@ -96,6 +96,6 @@
       "account-guardrail",
       "holdfast-total"
     ],
-    "note": "names starting with holdfast left in each service, from aws_check.sh after each destroy; copied from its output, which was not saved to a file"
+    "note": "names starting with holdfast left in each service, printed by scripts/aws_check.sh after each destroy and transcribed in inputs/teardown-check.txt"
   }
 }

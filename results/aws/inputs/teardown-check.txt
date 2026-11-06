@@ -1,0 +1,19 @@
+# What scripts/aws_check.sh printed after each destroy, copied from the terminal (the
+# script printed and saved nothing else). Each service line lists what is left whose name
+# starts with holdfast; the budgets are the two kept on purpose.
+== after the first destroy (2026-11-06T06:08:23Z)
+lambda:
+dynamodb:
+api:
+iam:
+logs:
+budgets:  account-guardrail	holdfast-total
+tagged project=holdfast (may lag deletes by minutes):
+== after the second destroy (2026-11-06T06:25:27Z)
+lambda:
+dynamodb:
+api:
+iam:
+logs:
+budgets:  account-guardrail	holdfast-total
+tagged project=holdfast (may lag deletes by minutes):
