@@ -171,7 +171,7 @@ func TestATableThatCantBeReadAnswers503(t *testing.T) {
 // with crdt.Compare on every pair, or the table and the edges would settle
 // on different winners and never converge. This checks it against the real
 // query engine, not just Go's string order, with logical parts of every
-// width a clock reaches (a sweep's stamps reach 38).
+// width a clock reaches (the clock-skew sweep's stamps reach 38).
 func TestTheStoreKeepsWhatMergeKeeps(t *testing.T) {
 	p := newPeer(t)
 	r := rand.New(rand.NewPCG(1, 2))
