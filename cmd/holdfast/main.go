@@ -194,20 +194,7 @@ func run(ctx context.Context, args []string) error {
 	}
 	if *trace != "" {
 		log.Info("replay scheduled", "records_in_coverage", len(recs), "start", start.UnixMilli())
-		go func() {
-			var maxLate time.Duration
-			err := replay.Play(ctx, recs, start, func(r replay.Record) {
-				due := start.Add(time.Duration(r.TMS) * time.Millisecond)
-				maxLate = max(maxLate, time.Since(due))
-				n.Ingest(crdt.ICAO(r.ICAO), crdt.Observation{
-					Lat: r.Lat, Lon: r.Lon, AltFt: r.AltFt, GSKt: r.GSKt, HeadingDeg: r.HeadingDeg,
-					ObservedAtMS: due.UnixMilli() - r.DelayMS, // a recorded report arrived after it was made
-				})
-			})
-			if err == nil {
-				log.Info("replay done", "records", len(recs), "max_late_ms", maxLate.Milliseconds())
-			}
-		}()
+		go ingestTrace(ctx, n, log, recs, start)
 	}
 
 	log.Info("listening", "addr", *listen, "peers", len(peerList), "clock", *clock, "clock_offset_ms", *offsetMS)
@@ -233,6 +220,22 @@ func shutdown(srv *http.Server, budget time.Duration, log *slog.Logger) error {
 		return nil
 	}
 	return err
+}
+
+// ingestTrace replays recs into n from start. A recorded report arrived
+// DelayMS after the aircraft was observed, so it is ingested as observed then.
+func ingestTrace(ctx context.Context, n *node.Node, log *slog.Logger, recs []replay.Record, start time.Time) {
+	var maxLate time.Duration
+	err := replay.Play(ctx, recs, start, func(r replay.Record) {
+		maxLate = max(maxLate, time.Since(start.Add(time.Duration(r.TMS)*time.Millisecond)))
+		n.Ingest(crdt.ICAO(r.ICAO), crdt.Observation{
+			Lat: r.Lat, Lon: r.Lon, AltFt: r.AltFt, GSKt: r.GSKt, HeadingDeg: r.HeadingDeg,
+			ObservedAtMS: start.UnixMilli() + r.ObservedMS(),
+		})
+	})
+	if err == nil {
+		log.Info("replay done", "records", len(recs), "max_late_ms", maxLate.Milliseconds())
+	}
 }
 
 // ingestLive polls the feed for this node's coverage from start until length

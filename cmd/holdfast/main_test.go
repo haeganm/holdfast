@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -16,6 +17,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/haeganm/holdfast/internal/node"
+	"github.com/haeganm/holdfast/internal/replay"
 )
 
 // peer records the Authorization header of every request it gets, and
@@ -156,6 +160,58 @@ func TestTheHarnessFlagsStillStart(t *testing.T) {
 		if err := run(stopped, append([]string{"-id", "a", "-listen", "127.0.0.1:0"}, args...)); err != nil {
 			t.Errorf("%q: %v", args, err)
 		}
+	}
+}
+
+// A recorded report arrived delay_ms after the aircraft was observed, so it
+// is ingested as observed that much before it is due. Every report in the
+// recorded hour has a delay; the synthetic trace the smoke run replays has
+// none, so only this checks the line behind every recorded observation time.
+func TestAReplayedReportIsObservedBeforeItArrived(t *testing.T) {
+	recs, err := replay.Read(strings.NewReader(
+		`{"t_ms":1000,"icao":"A1B2C3","lat":39,"lon":-77,"alt":0,"gs":0,"hdg":0,"node":"a","delay_ms":400}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := node.New(node.Config{ID: "a", StartupHold: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now().Add(-time.Minute) // so the report is already due
+	ingestTrace(context.Background(), n, slog.New(slog.DiscardHandler), recs, start)
+	if got, want := n.Tracks()["A1B2C3"].Obs.ObservedAtMS, start.UnixMilli()+1000-400; got != want {
+		t.Fatalf("observed at %d, want %d: it arrived 400 ms after it was made", got, want)
+	}
+}
+
+// The live path: what the feed reports inside this node's coverage is
+// ingested, and nothing outside it.
+func TestALiveFeedIsIngestedInsideTheCoverage(t *testing.T) {
+	feed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `{"now":%d,"ac":[{"hex":"a1b2c3","lat":39.01,"lon":-77,"seen_pos":0.5},`+
+			`{"hex":"d4e5f6","lat":45,"lon":-77,"seen_pos":0.5}]}`, time.Now().UnixMilli())
+	}))
+	defer feed.Close()
+	n, err := node.New(node.Config{ID: "a", StartupHold: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		ingestLive(ctx, n, slog.New(slog.DiscardHandler), replay.Circle{Lat: 39, Lon: -77, RadiusKm: 60},
+			feed.URL, time.Hour, 0, time.Now(), 0)
+	}()
+	for deadline := time.Now().Add(5 * time.Second); len(n.Tracks()) == 0; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("nothing the feed reported was ingested")
+		}
+	}
+	cancel()
+	<-stopped
+	if got := n.Tracks(); len(got) != 1 || got["A1B2C3"].Origin != "a" {
+		t.Fatalf("ingested %v, want only A1B2C3, the aircraft inside the coverage", got)
 	}
 }
 

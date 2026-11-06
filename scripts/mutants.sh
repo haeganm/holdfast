@@ -121,6 +121,8 @@ mutants=(
   "edge: a trace offset past the last record replays nothing|cmd/holdfast/main.go|s/if len\(all\) == 0 \|\| \*from > all\[len\(all\)-1\]\.TMS \{/if false {/"
   "edge: a start long past makes every report due at once|cmd/holdfast/main.go|s/\*t0 != 0 && late > 5\*time\.Second/false/"
   "edge: an upload that outlasts the shutdown budget fails the stop|cmd/holdfast/main.go|s/\t\tsrv\.Close\(\)\n\t\treturn nil\n/\t\treturn err\n/"
+  "edge: a recorded report's delay is added, not subtracted|cmd/holdfast/main.go|s/ObservedAtMS: start\.UnixMilli\(\) \+ r\.ObservedMS\(\)/ObservedAtMS: start.UnixMilli() + r.TMS + r.DelayMS/"
+  "edge: nothing the live feed reports is ingested|cmd/holdfast/main.go|s/n\.Ingest\(r\.ICAO, r\.Obs\)/_ = r/"
   "replay: coverage lets a NaN through|internal/replay/trace.go|s/ok := c\.Lat >= -90 && c\.Lat <= 90 && c\.Lon >= -180 && c\.Lon <= 180 && c\.RadiusKm > 0/ok := !(c.Lat < -90 || c.Lat > 90 || c.Lon < -180 || c.Lon > 180) \&\& c.RadiusKm > 0/"
   "replay: coverage takes an infinite radius|internal/replay/trace.go|s/ && !math\.IsInf\(c\.RadiusKm, 1\)//"
   "replay: Read keeps a line's first record and drops the rest|internal/replay/trace.go|s/if strings\.TrimSpace\(text\[dec\.InputOffset\(\):\]\) != \"\" \{/if false {/"
