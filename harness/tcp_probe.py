@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # python -I leaves the script's folder off the path
-import run as h  # noqa: E402
+import run as h
 
 KEYS = {
     "Tcp": ["ActiveOpens", "RetransSegs", "OutSegs"],
@@ -32,10 +32,10 @@ KEYS = {
 def tcp_counters(node: str) -> dict[str, int]:
     out = h.sh("docker", "exec", f"hf-{node}", "cat", "/proc/net/snmp", "/proc/net/netstat").splitlines()
     got = {}
-    for head, vals in zip(out[::2], out[1::2]):  # each table is a header line, then a value line
+    for head, vals in zip(out[::2], out[1::2], strict=True):  # each table is a header line, then a value line
         name, *cols = head.split()
         _, *nums = vals.split()
-        for k, v in zip(cols, nums):
+        for k, v in zip(cols, nums, strict=True):
             if k in KEYS.get(name.rstrip(":"), []):
                 got[k] = int(v)
     return got

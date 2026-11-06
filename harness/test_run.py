@@ -465,7 +465,7 @@ class LiveReceiptTest(unittest.TestCase):
 class AwsTest(unittest.TestCase):
     def run_with_hashes(self, edges, cloud):
         run = h.Run(h.Config("aws", "aws", "loss0", "hlc", 0, "live"), 0, 1000, 0)
-        run.extra["cloud_check"] = {"tries": 2, "edges": dict(zip(h.EDGES, edges)), "cloud": {"hash": cloud, "n": 0}}
+        run.extra["cloud_check"] = {"tries": 2, "edges": dict(zip(h.EDGES, edges, strict=True)), "cloud": {"hash": cloud, "n": 0}}
         cols = h.cloud_columns(run, 10)
         self.assertEqual(cols["cloud_check_tries"], 2)
         return cols["cloud_matches"]
@@ -660,10 +660,6 @@ class RawRoundTripTest(unittest.TestCase):
             self.assertEqual(again.cfg, cfg)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ReceiptTest(unittest.TestCase):
     def test_first_receipt_of_each_observation_in_the_window(self):
         records = [
@@ -702,3 +698,7 @@ class SourceTest(unittest.TestCase):
         for bad in ("../harness/run.py", "nope.jsonl", "sub/dir.jsonl"):
             with self.assertRaises(RuntimeError):
                 h.source_flag(bad)
+
+
+if __name__ == "__main__":
+    unittest.main()

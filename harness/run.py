@@ -70,8 +70,8 @@ Definitions used throughout:
                        which left out exactly the positions the feed delivered late.
     diverge_*          at each poll, the fraction of aircraft on which the edge nodes do
                        not all hold the same value (missing counts as different): mean
-                       and max over ingest, and mean while a cut is fully in force.
-                       Added after the predictions.
+                       and max over ingest after the warm-up, and mean while a cut is
+                       fully in force. Added after the predictions.
     catchup_ms         after a heal, time until every edge node holds, for every
                        aircraft, a report at least as fresh as the freshest one any edge
                        had made by the heal. It has no floor taken from before the cut,
@@ -92,6 +92,9 @@ Definitions used throughout:
     merged_cut         received tracks the edge nodes merged while a cut was fully in
                        force (one client timeout after the cut, until the heal); added
                        after the predictions
+    wrong_final        aircraft whose value on node a at the last poll is older than the
+                       freshest report any edge made of it. It reads a alone, which is
+                       enough once the run settled: every node then holds a's value.
 Only edge nodes count toward lag; the star hub is a relay and has no coverage.
 """
 
@@ -196,7 +199,7 @@ def experiments(family: str) -> list[Config]:
                  + [Config("real-base", "mesh", s, c, 4000, TRACE) for c in ("hlc", "wall")
                     for s in ("loss20", "partition")])
     return {"sync": sync, "clock": clock, "live": live, "cloud": cloud, "aws": aws, "real-hour": real_hour,
-            "real-base": real_base, "all": sync + clock}[family]
+            "real-base": real_base}[family]
 
 
 INGEST_S = 50  # a run's default seconds of ingest
@@ -969,7 +972,7 @@ def main() -> int:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--smoke", action="store_true", help="three short runs (clean, partition, cloud); exit 1 unless all converge")
-    ap.add_argument("--family", choices=("sync", "clock", "live", "cloud", "aws", "real-hour", "real-base", "all"))
+    ap.add_argument("--family", choices=("sync", "clock", "live", "cloud", "aws", "real-hour", "real-base"))
     ap.add_argument("--reanalyze", type=Path, metavar="DIR", help="recompute DIR/summary.csv from DIR/raw")
     ap.add_argument("--repeats", type=int, default=5)
     ap.add_argument("--duration", type=int, help="seconds of ingest (default 50, smoke 20)")
