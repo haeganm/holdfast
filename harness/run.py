@@ -198,6 +198,7 @@ def experiments(family: str) -> list[Config]:
             "real-base": real_base, "all": sync + clock}[family]
 
 
+INGEST_S = 50  # a run's default seconds of ingest
 REAL_HOUR_S = 59  # 60 windows of 59 s cover 3540 s of the 3582 s recording
 
 
@@ -974,7 +975,7 @@ def main() -> int:
         if not configs:
             ap.error(f"--only {args.only!r} matches no configuration of {args.family}")
     repeats = 1 if args.smoke else args.repeats
-    default_s = 20 if args.smoke else REAL_HOUR_S if args.family == "real-hour" else 50
+    default_s = 20 if args.smoke else REAL_HOUR_S if args.family == "real-hour" else INGEST_S
     duration_ms = (args.duration or default_s) * 1000
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out = args.out or ROOT / "results" / f"{stamp}-{'smoke' if args.smoke else args.family}"

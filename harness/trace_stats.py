@@ -15,7 +15,14 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-REAL_BASE_WINDOWS = [(w * 450_000, w * 450_000 + 50_000) for w in range(8)]  # as run.py replays them
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # python -I leaves the script's folder off the path
+import run as h
+
+
+def windows(family: str, n: int, length_ms: int) -> list[tuple[int, int]]:
+    """[lo, hi) in the trace of a family's first n windows, as run.py replays them."""
+    cfg = h.Config(family, "mesh", "loss0", "hlc", 0)
+    return [(h.window_ms(cfg, w), h.window_ms(cfg, w) + length_ms) for w in range(n)]
 
 
 def load(path: Path) -> list[dict]:
@@ -29,16 +36,16 @@ def observed(r: dict) -> int:
 
 def late_reports(recs: list[dict], lo: int, hi: int) -> int:
     """Reports received in [lo, hi) after some node had already received a
-    fresher observation of the same aircraft (earlier receipts count too)."""
+    fresher observation of the same aircraft in [lo, hi): what a run that
+    replays the window, starting empty, can see."""
     seen: dict[str, int] = {}
     late = 0
     for r in recs:
-        if r["t_ms"] >= hi:
-            break
-        best = seen.get(r["icao"])
-        if lo <= r["t_ms"] and best is not None and best > observed(r):
-            late += 1
-        seen[r["icao"]] = observed(r) if best is None else max(best, observed(r))
+        if lo <= r["t_ms"] < hi:
+            best = seen.get(r["icao"])
+            if best is not None and best > observed(r):
+                late += 1
+            seen[r["icao"]] = observed(r) if best is None else max(best, observed(r))
     return late
 
 
@@ -106,8 +113,10 @@ def facts(recs: list[dict]) -> None:
 def main() -> int:
     recs = load(Path(sys.argv[1]))
     facts(recs)
+    late = [late_reports(recs, lo, hi) for lo, hi in windows("real-hour", 60, h.REAL_HOUR_S * 1000)]
+    print(f"\nreal-hour windows: late reports in {sum(n > 0 for n in late)} of {len(late)}, {sum(late)} in all")
     print("\nreal-base windows: late reports, and the wall clock's expected lost writes by c's skew")
-    for lo, hi in REAL_BASE_WINDOWS:
+    for lo, hi in windows("real-base", 8, h.INGEST_S * 1000):
         losses = {k: expected_wall_losses(recs, lo, hi, k) for k in (-4000, -2000, 2000, 4000)}
         print(f"  from {lo // 1000:4d} s: late {late_reports(recs, lo, hi)}, handoffs from c {handoffs_from(recs, lo, hi)}, lost " +
               ", ".join(f"{k:+d} ms: {v}" for k, v in losses.items()))

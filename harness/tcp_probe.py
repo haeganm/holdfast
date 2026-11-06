@@ -47,7 +47,7 @@ def probe(spec: str, out: Path, commit: str) -> dict:
     run = h.Run(h.Config("probe", "mesh", scenario, "hlc", 0), 0, 50_000, 10_000, commit=commit)
     th = threading.Thread(target=h.execute, args=(run,))
     th.start()
-    time.sleep(8 + 5)  # execute starts the trace 8 s out; skip the first 5 s of ingest
+    time.sleep(h.LEAD_MS / 1000 + 5)  # execute starts the trace LEAD_MS out; skip the first 5 s of ingest
     first = {n: (tcp_counters(n), h.get_state(n)["counters"]) for n in h.EDGES}
     time.sleep(50 - 5 - 2)
     last = {n: (tcp_counters(n), h.get_state(n)["counters"]) for n in h.EDGES}

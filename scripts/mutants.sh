@@ -88,6 +88,7 @@ mutants=(
   "harness: bytes per useful update counts the hub's relay merges|harness/run.py|s/for n in EDGES\) if upto else 0/for n in run.nodes) if upto else 0/"
   "harness: bytes per useful update counts merges after the bytes stopped|harness/run.py|s/upto = \[p\.states for p in run\.polls if p\.t <= run\.events\[\"tx:end\"\]\]/upto = [p.states for p in run.polls]/"
   "harness: propagation reaches a node before the report arrived|harness/run.py|s/out\.append\(max\(0, now - q\.pop\(0\)\[1\]\)\)/out.append(now - q.pop(0)[1])/"
+  "harness: the trace's late reports count receipts from before the window|harness/trace_stats.py|s/if lo <= r\[\"t_ms\"\] < hi:\n            best = seen\.get\(r\[\"icao\"\]\)\n            if best is not None/if r[\"t_ms\"] < hi:\n            best = seen.get(r[\"icao\"])\n            if lo <= r[\"t_ms\"] and best is not None/"
 )
 
 work="$(mktemp -d)"
