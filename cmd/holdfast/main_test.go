@@ -139,6 +139,8 @@ func TestBadFlagsAreRefusedAtStartup(t *testing.T) {
 		{"a negative trace offset", "-trace-from-ms", []string{"-trace", trace, "-coverage", "39,-77,60", "-trace-from-ms", "-1"}},
 		{"a trace offset past the last record", "-trace-from-ms", []string{"-trace", trace, "-coverage", "39,-77,60", "-trace-from-ms", "1001"}},
 		{"a start in 1970", "-t0", []string{"-trace", trace, "-coverage", "39,-77,60", "-t0", "1"}},
+		{"no live interval", "-live-interval", []string{"-trace", trace, "-coverage", "39,-77,60", "-live-interval", "0s"}},
+		{"a live interval under a second", "-live-interval", []string{"-trace", trace, "-coverage", "39,-77,60", "-live-interval", "999ms"}},
 		{"a live feed with no scheme", "-live-url", []string{"-live-url", "api.adsb.lol/v2/point", "-coverage", "39,-77,60"}},
 		{"NaN coverage", "coverage", []string{"-trace", trace, "-coverage", "NaN,NaN,60"}},
 	} {

@@ -76,8 +76,8 @@ func run(ctx context.Context, args []string) error {
 	if *trace != "" && *live != "" {
 		return errors.New("give -trace or -live-url, not both")
 	}
-	if *every <= 0 {
-		return fmt.Errorf("-live-interval %v: must be positive", *every)
+	if *every < time.Second {
+		return fmt.Errorf("-live-interval %v: must be at least 1s", *every)
 	}
 	if (*trace == "" && *live == "") != (*coverage == "") {
 		return errors.New("-coverage goes with -trace or -live-url")
