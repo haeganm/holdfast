@@ -482,6 +482,58 @@ func TestRestoreAdvancesTheClockAndRefusesBadTracks(t *testing.T) {
 	}
 }
 
+// Nobody authenticates a peer, so the replica bounds itself. Once it holds
+// maxEntries aircraft, a track for one it doesn't hold is refused and counted,
+// whether a host restores it, a peer sends it or the node's own sensor reports
+// it, and the aircraft it holds still update.
+func TestAFullReplicaRefusesNewAircraft(t *testing.T) {
+	ts := hlc.Timestamp{WallMS: simStartMS}
+	aircraft := func(k int) map[crdt.ICAO]crdt.Track {
+		m := make(map[crdt.ICAO]crdt.Track, k)
+		for i := range k {
+			m[crdt.ICAO(fmt.Sprintf("%06X", i))] = crdt.Track{Obs: obs(1), TS: ts, Origin: "b"}
+		}
+		return m
+	}
+	newNode := func() *Node {
+		n, err := New(Config{ID: "a", Now: func() time.Time { return time.UnixMilli(simStartMS) }, StartupHold: -1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+
+	n := newNode()
+	if refused := n.Restore(aircraft(maxEntries + 1)); len(refused) != 0 || n.tracks.Len() != maxEntries || n.Counters().Capped != 1 {
+		t.Fatalf("restoring %d valid aircraft refused %v, kept %d, capped %d; want none refused, %d kept, 1 capped",
+			maxEntries+1, refused, n.tracks.Len(), n.Counters().Capped, maxEntries)
+	}
+
+	n = newNode()
+	if err := n.receive(ts, aircraft(maxEntries)); err != nil {
+		t.Fatal(err)
+	}
+	later := hlc.Timestamp{WallMS: simStartMS + 1}
+	if err := n.receive(later, map[crdt.ICAO]crdt.Track{
+		"FFFFF0": {Obs: obs(2), TS: later, Origin: "b"}, // new
+		"000000": {Obs: obs(2), TS: later, Origin: "b"}, // held
+	}); err != nil {
+		t.Fatal(err)
+	}
+	n.Ingest("FFFFF1", obs(3)) // new
+	n.Ingest("000001", obs(3)) // held
+	snap := n.tracks.Snapshot()
+	if c := n.Counters(); len(snap) != maxEntries || c.Capped != 2 {
+		t.Fatalf("%d aircraft and capped %d after a peer and the sensor each sent a new one; want %d and 2", len(snap), c.Capped, maxEntries)
+	}
+	if snap["000000"].TS != later || snap["000001"].Origin != "a" {
+		t.Fatalf("an aircraft the full replica holds did not update: %+v, %+v", snap["000000"], snap["000001"])
+	}
+	if _, ok := n.own["FFFFF1"]; ok {
+		t.Fatal("the node counts a report it refused among its own, which would grow without bound")
+	}
+}
+
 func TestMetricsExposition(t *testing.T) {
 	n, srv := newLoneNode(t)
 	n.Ingest("ABCDEF", obs(1))
@@ -494,6 +546,7 @@ func TestMetricsExposition(t *testing.T) {
 	for _, want := range []string{
 		"# TYPE holdfast_tracks gauge\nholdfast_tracks 1\n",
 		"holdfast_ingest_total 1\n",
+		"holdfast_capped_total 0\n",
 		`holdfast_sync_requests_total{result="err"} 0` + "\n",
 		"# TYPE holdfast_sync_bytes_total counter\n",
 	} {

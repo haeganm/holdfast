@@ -32,11 +32,12 @@ import (
 const (
 	maxBody = 4 << 20 // bytes per request or response body
 
-	// ponytail: a digest carries the whole replica, so past maxEntries
-	// aircraft every sync is rejected and replicas stop converging (a peer
-	// can force that with two pushes). Paging the digest, or Merkle ranges,
-	// is the upgrade when the picture outgrows it.
-	maxEntries = 10_000 // aircraft per digest or track batch
+	// ponytail: the replica holds at most maxEntries aircraft, so a digest
+	// of all of it always fits in one message. Once it is full, a track for
+	// a new aircraft is refused until expiry makes room, so a busy sky, or a
+	// peer pushing made-up aircraft, keeps new ones out. Paging the digest,
+	// or Merkle ranges, is the upgrade when the picture outgrows it.
+	maxEntries = 10_000 // aircraft per digest, track batch or replica
 
 )
 
@@ -107,6 +108,7 @@ type Counters struct {
 	MergeRegress  int64 `json:"merge_regress"` // a received track won but was older than what it replaced
 	MergeExpired  int64 `json:"merge_expired"` // a received track had already expired here
 	Expired       int64 `json:"expired"`       // aircraft dropped by TrackTTL
+	Capped        int64 `json:"capped"`        // a track for a new aircraft refused because the replica was full
 	SyncOK        int64 `json:"sync_ok"`
 	SyncErr       int64 `json:"sync_err"`
 	Rejected      int64 `json:"rejected"`  // inbound messages refused at the trust boundary
@@ -119,7 +121,7 @@ type counters struct {
 	ingestTotal, ingestLost, ingestHeld    atomic.Int64
 	ingestRegress, sensorErrors            atomic.Int64
 	mergeApplied, mergeStale, mergeRegress atomic.Int64
-	mergeExpired, expired                  atomic.Int64
+	mergeExpired, expired, capped          atomic.Int64
 	syncOK, syncErr, rejected, aborted     atomic.Int64
 	bytesOut, bytesIn                      atomic.Int64
 }
@@ -246,6 +248,11 @@ func (n *Node) holding() bool {
 // stamp writes a local observation with a fresh stamp. Callers hold mu, so no
 // merge can land between taking the stamp and storing it.
 func (n *Node) stamp(id crdt.ICAO, obs crdt.Observation) {
+	if n.full(id) {
+		n.c.capped.Add(1)
+		delete(n.own, id) // own keeps only aircraft the replica holds, so it stays bounded too
+		return
+	}
 	won, prev := n.tracks.Put(id, crdt.Track{Obs: obs, TS: n.clock.Now(), Origin: n.id})
 	switch {
 	case !won && prev.Obs.ObservedAtMS < obs.ObservedAtMS:
@@ -253,6 +260,17 @@ func (n *Node) stamp(id crdt.ICAO, obs crdt.Observation) {
 	case won && prev.Origin != "" && obs.ObservedAtMS < prev.Obs.ObservedAtMS:
 		n.c.ingestRegress.Add(1)
 	}
+}
+
+// full reports whether a track for id would add an aircraft to a replica that
+// already holds maxEntries. Callers hold mu, which every write to the replica
+// takes, so the answer still holds when they put.
+func (n *Node) full(id crdt.ICAO) bool {
+	if n.tracks.Len() < maxEntries {
+		return false
+	}
+	_, held := n.tracks.Get([]crdt.ICAO{id})[id]
+	return !held
 }
 
 // cutoff is the wall time before which a stored stamp has expired. It only
@@ -289,9 +307,10 @@ func (n *Node) expireLocked() {
 
 // Restore loads tracks kept outside the node, such as the cloud peer's table,
 // and advances the clock past every one it keeps. Each passes the same checks
-// as a track in a peer's message, and one that has already expired is left
-// out, as a peer's would be. It returns the aircraft it refused as invalid,
-// so the host can repair what it stores for them.
+// as a track in a peer's message, and one that has already expired, or is for
+// a new aircraft once the replica is full, is left out, as a peer's would be.
+// It returns the aircraft it refused as invalid, so the host can repair what
+// it stores for them.
 func (n *Node) Restore(tracks map[crdt.ICAO]crdt.Track) (refused []crdt.ICAO) {
 	limit := n.physNow().Add(n.maxDrift).UnixMilli()
 	keep := make(map[crdt.ICAO]crdt.Track, len(tracks))
@@ -311,7 +330,13 @@ func (n *Node) Restore(tracks map[crdt.ICAO]crdt.Track) (refused []crdt.ICAO) {
 	cut := n.cutoff()
 	maps.DeleteFunc(keep, func(_ crdt.ICAO, t crdt.Track) bool { return t.TS.WallMS < cut })
 	n.clock.Update(high)
-	n.tracks.MergeAll(keep)
+	for id, t := range keep {
+		if n.full(id) {
+			n.c.capped.Add(1)
+			continue
+		}
+		n.tracks.Put(id, t)
+	}
 	slices.Sort(refused)
 	return refused
 }
@@ -345,6 +370,10 @@ func (n *Node) receive(msgTS hlc.Timestamp, tracks map[crdt.ICAO]crdt.Track) err
 	for id, t := range tracks {
 		if t.TS.WallMS < cut {
 			n.c.mergeExpired.Add(1)
+			continue
+		}
+		if n.full(id) {
+			n.c.capped.Add(1)
 			continue
 		}
 		won, prev := n.tracks.Put(id, t)
@@ -711,7 +740,7 @@ func (n *Node) Counters() Counters {
 		IngestTotal: c.ingestTotal.Load(), IngestLost: c.ingestLost.Load(), IngestHeld: c.ingestHeld.Load(),
 		IngestRegress: c.ingestRegress.Load(), SensorErrors: c.sensorErrors.Load(),
 		MergeApplied: c.mergeApplied.Load(), MergeStale: c.mergeStale.Load(), MergeRegress: c.mergeRegress.Load(),
-		MergeExpired: c.mergeExpired.Load(), Expired: c.expired.Load(),
+		MergeExpired: c.mergeExpired.Load(), Expired: c.expired.Load(), Capped: c.capped.Load(),
 		SyncOK: c.syncOK.Load(), SyncErr: c.syncErr.Load(), Rejected: c.rejected.Load(), Aborted: c.aborted.Load(),
 		BytesOut: c.bytesOut.Load(), BytesIn: c.bytesIn.Load(),
 	}
@@ -740,6 +769,7 @@ func (n *Node) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 		{"holdfast_merge_regress_total", "counter", "Received tracks that won but were older than what they replaced.", "", c.MergeRegress},
 		{"holdfast_merge_expired_total", "counter", "Received tracks that had already expired here.", "", c.MergeExpired},
 		{"holdfast_expired_total", "counter", "Aircraft dropped because their track expired.", "", c.Expired},
+		{"holdfast_capped_total", "counter", "Tracks for new aircraft refused because the picture was full.", "", c.Capped},
 		{"holdfast_sync_requests_total", "counter", "Sync rounds by outcome.", `result="ok"`, c.SyncOK},
 		{"holdfast_sync_requests_total", "counter", "", `result="err"`, c.SyncErr},
 		{"holdfast_rejected_total", "counter", "Inbound messages refused at the trust boundary.", "", c.Rejected},

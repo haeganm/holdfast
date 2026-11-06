@@ -44,7 +44,7 @@ mutants=(
   "merge_regress is never counted|internal/node/node.go|s/\t\t\tn\.c\.mergeRegress\.Add\(1\)\n//"
   "Ord drops the origin terminator|internal/crdt/track.go|s/\tb = append\(b, ' '\) \/\/ below/\t\/\/ below/"
   "Ord treats negative numbers as positive|internal/crdt/track.go|s/\t\treturn \^u\n/\t\treturn u\n/"
-  "Restore does not advance the clock|internal/node/node.go|s/\tn\.clock\.Update\(high\)\n\tn\.tracks\.MergeAll\(keep\)/\t_ = high\n\tn.tracks.MergeAll(keep)/"
+  "Restore does not advance the clock|internal/node/node.go|s/\tn\.clock\.Update\(high\)\n\tfor id, t := range keep \{/\t_ = high\n\tfor id, t := range keep {/"
   "Restore loads invalid tracks|internal/node/node.go|s/if checkTrack\(id, t, limit\) != nil \{/if false \&\& checkTrack(id, t, limit) != nil {/"
   "checksum ignores speed and heading|internal/crdt/track.go|s/o\.AltFt, o\.GSKt, o\.HeadingDeg\}/o.AltFt}/"
   "cloud: the write condition replaces any different track|cloud/peer.go|s/ord < :ord/ord <> :ord/"
@@ -141,6 +141,7 @@ mutants=(
   "a stale merge counts as applied|internal/node/node.go|s/n\.c\.mergeStale\.Add\(1\)/n.c.mergeApplied.Add(1)/"
   "receive merges before advancing its clock|internal/node/node.go|s/\tn\.clock\.Update\(high\)\n\tfor id, t := range tracks \{/\t_ = high\n\tfor id, t := range tracks {/"
   "receive advances its clock only to the message stamp|internal/node/node.go|s/\tfor _, t := range tracks \{\n\t\tif t\.TS\.Compare\(high\) > 0 \{\n\t\t\thigh = t\.TS\n/\tfor _, t := range tracks {\n\t\tif t.TS.Compare(high) > 0 {\n\t\t\tcontinue\n/"
+  "node lets a new aircraft into a full replica|internal/node/node.go|s/if n\.tracks\.Len\(\) < maxEntries \{/if true {/"
 )
 
 work="$(mktemp -d)"
