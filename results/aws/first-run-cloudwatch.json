@@ -1,0 +1,18 @@
+{
+  "lambda_Invocations": 1746.0,
+  "lambda_Errors": 0.0,
+  "lambda_Throttles": 0.0,
+  "lambda_ConcurrentExecutions": 3.0,
+  "api_Count": 1746.0,
+  "api_4xx": 1.0,
+  "api_5xx": 0.0,
+  "ddb_ConsumedReadCapacityUnits": 6980.0,
+  "ddb_ConsumedWriteCapacityUnits": 590.0,
+  "ddb_ReadThrottleEvents": 0,
+  "ddb_WriteThrottleEvents": 0,
+  "window": [
+    "2026-11-06T05:56:53Z",
+    "2026-11-06T06:10:22Z"
+  ],
+  "note": "first deployed run, 2026-11-06 05:57-06:08 UTC: two of its polls timed out, so it was set aside and run again; the Lambda logs were not kept (a copy step failed)"
+}

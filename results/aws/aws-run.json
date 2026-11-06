@@ -1,0 +1,69 @@
+{
+  "harness": {
+    "run_id": "aws-aws-loss0-hlc-skew0-r0",
+    "settled": "True",
+    "settle_ms": "71",
+    "cloud_matches": "True",
+    "cloud_check_tries": "1",
+    "aircraft": "12",
+    "ingest_total": "414",
+    "prop_p50": "1307",
+    "prop_p95": "2112",
+    "prop_p99": "2343",
+    "prop_unresolved": "0.0",
+    "stale_p50": "3878",
+    "stale_p99": "28609",
+    "sync_err_rate": "0.0006",
+    "feed_delay_p50": "1122",
+    "commit": "6f22fcb",
+    "errors": ""
+  },
+  "lambda": {
+    "invocations_logged": 1757,
+    "cold_starts": 2,
+    "init_ms_median": 81.325,
+    "init_ms_max": 88.36,
+    "duration_ms_p50": 8.65,
+    "duration_ms_p95": 35.35,
+    "duration_ms_p99": 80.27,
+    "duration_ms_max": 1502.35,
+    "max_memory_mb": 34,
+    "billed_gb_s": 3.67
+  },
+  "peer": {
+    "requests_by_path_status": {
+      "/sync 200": 1660,
+      "/push 204": 96,
+      "/hash 200": 1
+    },
+    "table_items_max": 13,
+    "writes": 414,
+    "won": 414,
+    "errors": 0
+  },
+  "cloudwatch": {
+    "lambda_invocations": 1758.0,
+    "lambda_errors": 0.0,
+    "lambda_throttles": 0.0,
+    "lambda_max_concurrency": 3.0,
+    "api_requests": 1758.0,
+    "api_4xx": 1.0,
+    "api_5xx": 0.0,
+    "ddb_read_units": 7028.0,
+    "ddb_write_units": 414.0,
+    "ddb_read_throttles": 0,
+    "ddb_write_throttles": 0,
+    "window": [
+      "2026-11-06T06:12:25Z",
+      "2026-11-06T06:27:23Z"
+    ]
+  },
+  "estimated_cost_usd": {
+    "api_gateway": 0.00176,
+    "lambda_requests": 0.00035,
+    "dynamodb_reads": 0.00088,
+    "dynamodb_writes": 0.00026,
+    "total": 0.0032,
+    "note": "listed us-east-1 prices, before any free tier; Lambda duration is inside the free tier"
+  }
+}
