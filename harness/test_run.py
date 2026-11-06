@@ -140,15 +140,15 @@ class AnalyzeTest(unittest.TestCase):
 
 
 class PublishedColumnsTest(unittest.TestCase):
-    """One recorded-trace run that every column of the summary row is pinned
-    on. Its window starts 60 s into the trace. a reports X, its reports
-    received 200 ms after each was observed, every second from 1000 (the
-    first two inside the warm-up); b reports Y, 6 s late, every second from
-    4500. Each node gets a peer's report 300 ms after its receipt, except c,
-    cut from 4000 until the heal at 8000: c catches up at 8300 and gets b's
-    last report only at 10_300, after ingest. Before Y's first report c
-    holds no Y, and through the cut it holds none while Y gets three more.
-    Polls every 500 ms; times are ms since the trace start."""
+    """One recorded-trace run that pins every column of the summary row. Its
+    window starts 60 s into the trace. a reports X every second from 1000
+    (the first two inside the warm-up), each received 200 ms after it was
+    observed; b reports Y every second from 4500, each received 6 s late.
+    Each node gets a peer's report 300 ms after its receipt, except c, cut
+    from 4000 until the heal at 8000: c catches up at 8300 and gets b's last
+    report only at 10_300, after ingest. Y's first report comes during the
+    cut, so c holds no Y through three more of them. Polls every 500 ms;
+    times are ms since the trace start."""
 
     X, Y = "AAAAAA", "BBBBBB"
     DELAY = {X: 200, Y: 6000}
@@ -198,23 +198,23 @@ class PublishedColumnsTest(unittest.TestCase):
         h.trace_records.cache_clear()
         self.addCleanup(h.trace_records.cache_clear)
         self.dir = Path(d.name)
-        self.run_ = h.Run(h.Config("test", "mesh", "partition", "hlc", 0, "fixture.jsonl"), 0, duration_ms=10_000,
-                          settle_ms_window=1000, trace_from_ms=60_000, vm_offset_ms=12, commit="abc1234",
-                          errors=["poll at 120 ms: timed out", "poll at 9620 ms: timed out"])
-        self.run_.polls = [self.poll_at(t) for t in range(0, 11_001, 500)]
-        self.run_.events = {"tx:start": 0, "tx:start_exec": 30, "cut": 4000, "cut_exec": 100, "heal": 8000,
-                            "heal_exec": 50, "tx:end": 10_020, "tx:end_exec": 30}
-        self.run_.tx = {"start": {"a": 1000, "b": 2000, "c": 3000}, "end": {"a": 31_000, "b": 32_000, "c": 15_000}}
+        self.exp = h.Run(h.Config("test", "mesh", "partition", "hlc", 0, "fixture.jsonl"), 0, duration_ms=10_000,
+                         settle_ms_window=1000, trace_from_ms=60_000, vm_offset_ms=12, commit="abc1234",
+                         errors=["poll at 120 ms: timed out", "poll at 9620 ms: timed out"])
+        self.exp.polls = [self.poll_at(t) for t in range(0, 11_001, 500)]
+        self.exp.events = {"tx:start": 0, "tx:start_exec": 30, "cut": 4000, "cut_exec": 100, "heal": 8000,
+                           "heal_exec": 50, "tx:end": 10_020, "tx:end_exec": 30}
+        self.exp.tx = {"start": {"a": 1000, "b": 2000, "c": 3000}, "end": {"a": 31_000, "b": 32_000, "c": 15_000}}
 
     def test_every_column(self):
-        row = h.analyze(self.run_, self.dir / "polls.csv")
+        row = h.analyze(self.exp, self.dir / "polls.csv")
         self.assertEqual(row, {
             "run_id": "test-mesh-partition-hlc-skew0-r0", "family": "test", "topology": "mesh", "scenario": "partition",
             "clock": "hlc", "skew_ms": 0, "source": "fixture.jsonl", "trace_from_ms": 60_000, "repeat": 0,
             "duration_ms": 10_000,
             # hashes first agree at 10_500, once c holds Y's last report
             "settled": True, "settle_ms": 500,
-            # before the cut the worst lag, and so the p95 of a poll's 6, is 1000; c is back under it at 8500
+            # before the cut the worst lag, and so the p95 of a poll's 6, is at most 1000; c is back to it at 8500
             "recover_p95_ms": 500, "recover_all_ms": 500,
             "cut_at_ms": 4000, "heal_at_ms": 8000, "heal_exec_ms": 50,
             # 6100 to 8000: b got X's 7000 report and a Y's 6500 one
@@ -225,9 +225,9 @@ class PublishedColumnsTest(unittest.TestCase):
             # 26 pairs after the warm-up: 17 delivered in 500, the 8 c missed in the cut 1000 to 4500
             # after their receipts, and Y's last at c in 1000
             "prop_p50": 500, "prop_p95": 4000, "prop_p99": 4500, "prop_n": 26, "prop_unresolved": 0.0,
-            "lag_p95": 3000, "lag_worst": 5000,  # 81 lags; c's X, 5000 behind just before the heal
-            # 45 ages of X, under 5.3 s, and 36 of Y, 6 s and more: Y's reports arrive 6 s old, yet its
-            # last report is always under 5 s old, so it counts
+            "lag_p95": 3000, "lag_worst": 5000,  # 81 lags; c's X, 5000 behind as the heal starts
+            # 45 ages of X, under 5.3 s, and 36 of Y, 6 s and more: Y's reports arrive 6 s old, but
+            # every poll comes under 5 s after its last one arrived, so it counts
             "stale_p50": 3200, "stale_p99": 9500,
             "behind_frac": 0.0778,
             "aircraft": 2, "overlap_frac": 0.0,
