@@ -4,10 +4,13 @@ formula can't quietly produce plausible numbers.
     python -m unittest discover -s harness
 """
 
+import contextlib
 import http.server
+import io
 import itertools
 import json
 import os
+import sys
 import tempfile
 import threading
 import unittest
@@ -405,6 +408,47 @@ class CommitLabelTest(unittest.TestCase):
             self.assertFalse(h.dirty(root), "a sweep's own results marked the checkout dirty")
             (root / "new.go").write_text("package x\n")
             self.assertTrue(h.dirty(root), "an untracked source file went unnoticed")
+
+    def test_two_different_dirty_trees_get_different_labels(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(h, "ROOT", Path(d)):
+            root = Path(d)
+            git = ("git", "-C", d, "-c", "user.name=t", "-c", "user.email=t@example.com")
+            h.sh(*git, "init", "-q")
+            (root / "a.go").write_text("package a\n")
+            h.sh(*git, "add", "a.go")
+            h.sh(*git, "commit", "-q", "-m", "a")
+            commit = h.git_commit()
+            (root / "a.go").write_text("package a // one\n")
+            one = h.git_commit()
+            (root / "a.go").write_text("package a // two\n")
+            self.assertNotEqual(h.git_commit(), one)
+            (root / "a.go").write_text("package a // one\n")
+            self.assertEqual(h.git_commit(), one, "the same tree got a different label")
+            (root / "b.go").write_text("package b\n")
+            self.assertNotEqual(h.git_commit(), one, "an untracked file left the label as it was")
+            (root / "b.go").unlink()
+            (root / "results").mkdir()
+            (root / "results" / "summary.csv").write_text("run_id\n")
+            self.assertEqual(h.git_commit(), one, "the sweep's own results changed the label")
+        self.assertRegex(one, f"^{commit}-dirty-[0-9a-f]{{7}}$")
+
+
+class SkipBuildTest(unittest.TestCase):
+    def test_a_reused_cloud_image_must_match_the_checkout_too(self):
+        labels = {h.IMAGE: "abc1234", h.CLOUD_IMAGE: "0ld0000"}
+
+        def docker(*args, env=None):
+            if args[:3] != ("docker", "image", "inspect"):
+                raise AssertionError(f"ran {args}")
+            return labels[args[3]] + "\n"
+
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(h, "sh", docker), \
+                mock.patch.object(h, "git_commit", lambda: "abc1234"), \
+                mock.patch.object(h, "execute", side_effect=AssertionError("a run started")), \
+                mock.patch.object(sys, "argv", ["run.py", "--family", "cloud", "--skip-build", "--out", d]), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(h.main(), 1)
+        self.assertIn(f"{h.CLOUD_IMAGE} was built from 0ld0000", out.getvalue())
 
 
 class RecoveryP95Test(unittest.TestCase):

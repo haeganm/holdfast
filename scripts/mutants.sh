@@ -90,6 +90,8 @@ mutants=(
   "harness: propagation reaches a node before the report arrived|harness/run.py|s/out\.append\(max\(0, now - q\.pop\(0\)\[1\]\)\)/out.append(now - q.pop(0)[1])/"
   "harness: a poll cut off mid-body ends the sweep|harness/run.py|s/READ_ERRORS = \(OSError, http\.client\.HTTPException, ValueError\)/READ_ERRORS = (OSError, ValueError)/"
   "harness: a poll that isn't JSON ends the sweep|harness/run.py|s/READ_ERRORS = \(OSError, http\.client\.HTTPException, ValueError\)/READ_ERRORS = (OSError, http.client.HTTPException)/"
+  "harness: --skip-build trusts the cloud peer's image|harness/run.py|s/if built != commit:/if built != commit and image == IMAGE:/"
+  "harness: two different dirty trees share a label|harness/run.py|s/return f\"\{commit\}-dirty-\{changes_hash\(ROOT\)\}\" if dirty/return f\"{commit}-dirty\" if dirty/"
   "harness: the trace's late reports count receipts from before the window|harness/trace_stats.py|s/if lo <= r\[\"t_ms\"\] < hi:\n            best = seen\.get\(r\[\"icao\"\]\)\n            if best is not None/if r[\"t_ms\"] < hi:\n            best = seen.get(r[\"icao\"])\n            if lo <= r[\"t_ms\"] and best is not None/"
 )
 

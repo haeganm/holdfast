@@ -102,6 +102,7 @@ import csv
 import datetime as dt
 import functools
 import gzip
+import hashlib
 import http.client
 import json
 import math
@@ -890,16 +891,31 @@ def dirty(root: Path) -> bool:
     return bool(sh("git", "-C", str(root), "status", "--porcelain", "--", ".", ":(exclude)results").strip())
 
 
+def changes_hash(root: Path) -> str:
+    """A short hash of how the checkout differs from its commit, results/
+    aside: the diff against HEAD, and every untracked file's path and contents."""
+    def git(*args: str) -> bytes:
+        return subprocess.run(("git", "-C", str(root), *args, "--", ".", ":(exclude)results"),
+                              capture_output=True, check=True).stdout
+    digest = hashlib.sha256(git("diff", "HEAD", "--binary"))
+    for path in git("ls-files", "-z", "--others", "--exclude-standard").split(b"\0"):
+        if path:
+            digest.update(path + b"\0" + (root / os.fsdecode(path)).read_bytes())
+    return digest.hexdigest()[:7]
+
+
 def git_commit() -> str:
+    """The checkout's short commit; a dirty one's also names what differs, so
+    two different dirty trees can't share a label."""
     try:
         commit = sh("git", "-C", str(ROOT), "rev-parse", "--short", "HEAD").strip()
-        return commit + "-dirty" if dirty(ROOT) else commit
-    except (RuntimeError, OSError):
+        return f"{commit}-dirty-{changes_hash(ROOT)}" if dirty(ROOT) else commit
+    except (RuntimeError, OSError, subprocess.CalledProcessError):
         return "unknown"
 
 
-def image_commit() -> str:
-    return sh("docker", "image", "inspect", IMAGE, "--format",
+def image_commit(image: str) -> str:
+    return sh("docker", "image", "inspect", image, "--format",
               "{{index .Config.Labels \"" + COMMIT_LABEL + "\"}}").strip()
 
 
@@ -961,7 +977,7 @@ def main() -> int:
     ap.add_argument("--out", type=Path)
     ap.add_argument("--no-heal", action="store_true",
                     help="never heal partitions; exists to prove the smoke gate fails when nodes stay apart")
-    ap.add_argument("--skip-build", action="store_true", help="reuse holdfast:dev if it was built from this commit")
+    ap.add_argument("--skip-build", action="store_true", help="reuse the images if they were built from this commit")
     ap.add_argument("--obs", action="store_true",
                     help=f"run Prometheus and Grafana alongside and leave them up afterwards ({GRAFANA})")
     ap.add_argument("--only", metavar="REGEX", help="run only the family's configurations whose run id matches")
@@ -987,22 +1003,21 @@ def main() -> int:
     out = args.out or ROOT / "results" / f"{stamp}-{'smoke' if args.smoke else args.family}"
     out.mkdir(parents=True, exist_ok=True)
 
-    # Results are credited to the commit the node image was built from, and a
+    # Results are credited to the commit the images were built from, and a
     # reused image must match the checkout, or the label would be a lie.
     commit = git_commit()
-    if args.skip_build:
-        built = image_commit()
-        if built != commit:
-            print(f"{IMAGE} was built from {built or 'an unlabeled tree'}, the checkout is {commit}; drop --skip-build")
-            return 1
-    else:
-        print(f"building {IMAGE} at {commit}", flush=True)
-        sh("docker", "build", "-q", "-t", IMAGE, "--label", f"{COMMIT_LABEL}={commit}",
-           "-f", str(ROOT / "harness" / "Dockerfile"), str(ROOT))
-        if any(c.topology == "cloud" for c in configs):
-            print(f"building {CLOUD_IMAGE} at {commit}", flush=True)
-            sh("docker", "build", "-q", "-t", CLOUD_IMAGE, "--label", f"{COMMIT_LABEL}={commit}",
-               "-f", str(ROOT / "cloud" / "Dockerfile"), str(ROOT))
+    images = {IMAGE: ROOT / "harness" / "Dockerfile"}
+    if any(c.topology == "cloud" for c in configs):
+        images[CLOUD_IMAGE] = ROOT / "cloud" / "Dockerfile"
+    for image, dockerfile in images.items():
+        if args.skip_build:
+            built = image_commit(image)
+            if built != commit:
+                print(f"{image} was built from {built or 'an unlabeled tree'}, the checkout is {commit}; drop --skip-build")
+                return 1
+        else:
+            print(f"building {image} at {commit}", flush=True)
+            sh("docker", "build", "-q", "-t", image, "--label", f"{COMMIT_LABEL}={commit}", "-f", str(dockerfile), str(ROOT))
 
     if args.obs:
         compose(placeholder_env(), "up", "-d", *OBS)
