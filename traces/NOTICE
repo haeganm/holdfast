@@ -8,12 +8,17 @@ It was recorded on 2026-11-05 from 18:17:41 to 19:17:41 UTC with
         -every 9s -duration 1h -out traces/adsb-2026-11-05.jsonl.gz
 
 by polling the adsb.lol API for a 70 nm circle around 39.0,-77.0 once every
-3 s and handing each response to the next sensor in turn. 601 of its 669
-requests were answered and 68 failed, so sensors observe less often than
-every 9 s. Each
-line is a position report as one sensor received it: t_ms is when, relative
-to the start of the recording, and delay_ms how long after the observation.
+3 s and handing each response to the next sensor in turn. That was about twice
+what the feed answers (10 requests a minute), so the recording is bursty:
+nearly every minute, about 27 s of answers, then about 33 s of waiting out a
+refusal. 601 of its 669 requests were answered and 68 failed; a sensor heard
+its circle every 9 s at the median but every 18 s on average. Each line is a
+position report as one sensor received it: t_ms is when, relative to the start
+of the recording, and delay_ms how long after the observation.
 
-If you redistribute this file or a database derived from it, keep it under
-the ODbL. Everything else in this repository is under the MIT license in
-LICENSE; seed1.jsonl is synthetic and covered by it.
+The raw polls committed in results/live/raw and results/aws/raw, and the
+recorded-hour-raw release asset, hold aircraft addresses and times taken from
+adsb.lol too, so they are under the ODbL as well. If you redistribute any of
+them, or a database derived from them, keep it under the ODbL. Everything else
+in this repository is under the MIT license in LICENSE; seed1.jsonl is
+synthetic and covered by it.
