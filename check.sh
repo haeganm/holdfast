@@ -88,7 +88,7 @@ scripts/mutants.sh
 step "cloud: the linux/arm64 Lambda binary Terraform deploys builds"
 (cd cloud && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -tags lambda.norpc -trimpath -o build/bootstrap .)
 
-step "cloud: the binary runs in AWS's Lambda runtime image and round-trips through DynamoDB"
+step "cloud: a linux/amd64 build runs in AWS's Lambda runtime image, refuses a wrong token and none, and round-trips through DynamoDB"
 "$PY" scripts/lambda_smoke.py
 
 step "terraform: fmt, validate, and the plan tests with a mocked provider"
