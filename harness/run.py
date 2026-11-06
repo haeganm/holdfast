@@ -57,12 +57,15 @@ Definitions used throughout:
                        what was attempted.
     lag_worst          the worst lag of any edge node on any aircraft at any poll during
                        ingest (after the warm-up); added after the predictions
-    stale_p50/p99      staleness, as age of information: at every poll during ingest,
-                       for every edge node and every aircraft some edge reported in the
-                       last 5 s, the node's clock minus the observation time of what it
-                       holds (or of the aircraft's first report, if it holds nothing).
-                       Continuous, unlike lag, which moves in whole report intervals.
-                       Added after the predictions.
+    stale_p50/p99      staleness, as age of information: at every poll during ingest
+                       after the warm-up, for every edge node and every aircraft whose
+                       latest report by some edge was received in the last 5 s (received
+                       as prop counts it: its first receipt by any node), the node's
+                       clock minus the observation time of what it holds (or of the
+                       aircraft's first report, if it holds nothing). Continuous, unlike
+                       lag, which moves in whole report intervals. Added after the
+                       predictions. It first kept aircraft observed in the last 5 s,
+                       which left out exactly the positions the feed delivered late.
     diverge_*          at each poll, the fraction of aircraft on which the edge nodes do
                        not all hold the same value (missing counts as different): mean
                        and max over ingest, and mean while a cut is fully in force.
@@ -710,17 +713,21 @@ def analyze(run: Run, polls_path: Path) -> dict:
     diverge: list[float] = []  # during ingest
     diverge_cut: list[float] = []  # while a cut is fully in force
     window = cut_window(run)
+    t0_abs = run.polls[0].states[run.nodes[0]]["now_ms"] - run.polls[0].t if run.polls else 0
+    receipt, feed_delays = receipts(run, t0_abs)
     polls_path.parent.mkdir(parents=True, exist_ok=True)
     with polls_path.open("w", newline="") as f:
         w = csv.writer(f, lineterminator="\n")
         w.writerow(["t_ms", "node", "n_tracks", "hash", "aircraft", "lag_p50", "lag_p95", "lag_max", "behind"])
         for p in run.polls:
             truth: dict[str, int] = {}
+            heard: dict[str, int] = {}  # when some edge's own latest report of it was received
             for n in EDGES:
                 for ac, tr in p.states[n]["tracks"].items():
                     own: int = tr.get("own", 0)
                     if own:
                         truth[ac] = max(truth.get(ac, 0), own)
+                        heard[ac] = max(heard.get(ac, 0), receipt.get((ac, own), own))
                         first_seen[ac] = min(first_seen.get(ac, own), own)
             poll_lags: list[float] = []
             behind = 0
@@ -734,7 +741,7 @@ def analyze(run: Run, polls_path: Path) -> dict:
                     for ac, fresh in truth.items():
                         have = tracks[ac]["at"] if ac in tracks else first_seen[ac]
                         lags.append(max(0, fresh - have))
-                        if ingesting and now - fresh <= ACTIVE_MS:
+                        if ingesting and now - heard[ac] <= ACTIVE_MS:
                             stale.append(max(0, now - have))
                     lags.sort()
                     poll_lags.extend(lags)
@@ -762,8 +769,6 @@ def analyze(run: Run, polls_path: Path) -> dict:
 
     samples.sort()
     stale.sort()
-    t0_abs = run.polls[0].states[run.nodes[0]]["now_ms"] - run.polls[0].t if run.polls else 0
-    receipt, feed_delays = receipts(run, t0_abs)
     prop, prop_pairs, prop_lost = propagation(run, receipt)
     final = run.polls[-1].states if run.polls else {}
     first = run.polls[0].states if run.polls else {}

@@ -160,6 +160,19 @@ class StalenessTest(unittest.TestCase):
         self.assertEqual(row["stale_p50"], 600)
         self.assertEqual(row["stale_p99"], 1000)
 
+    def test_a_late_position_counts_while_its_report_is_fresh(self):
+        # Live: a's report of a position observed at 1000 first shows at the
+        # 7000 poll, 6 s late. It was received under 5 s ago, so the aircraft
+        # counts, at the age of what each node holds: 6 s, then 6.5 s.
+        run = h.Run(h.Config("live", "mesh", "loss0", "hlc", 0, "live"), 0, duration_ms=10_000, settle_ms_window=0)
+        mine = {"AAAAAA": {"ts": {}, "origin": "a", "at": T0 + 1000, "own": T0 + 1000}}
+        held = {"AAAAAA": {"ts": {}, "origin": "a", "at": T0 + 1000}}
+        run.polls = [poll(7000, a=state(7000, mine), b=state(7000, {}), c=state(7000, {})),
+                     poll(7500, a=state(7500, mine), b=state(7500, held), c=state(7500, held))]
+        with tempfile.TemporaryDirectory() as d:
+            row = h.analyze(run, Path(d) / "polls.csv")
+        self.assertEqual((row["stale_p50"], row["stale_p99"]), (6000, 6500))
+
 
 class DivergenceTest(unittest.TestCase):
     SAME = {"ts": {"w": 1, "l": 0}, "origin": "a", "at": 1}

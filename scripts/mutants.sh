@@ -76,13 +76,15 @@ mutants=(
   "harness: merges during the cut count from the first poll|harness/run.py|s/inside = \[p for p in run\.polls if window\[0\] <= p\.t < window\[1\]\] if window else \[\]/inside = run.polls/"
   "harness: worst lag keeps the best poll|harness/run.py|s/else max\(lag_worst, worst\)/else min(lag_worst, worst)/"
   "harness: undelivered reports are dropped silently|harness/run.py|s/return out, pairs, sum\(len\(q\) for q in pending\.values\(\)\)/return out, pairs, 0/"
-  "harness: staleness counts aircraft long gone quiet|harness/run.py|s/if ingesting and now - fresh <= ACTIVE_MS:/if ingesting:/"
+  "harness: staleness counts aircraft long gone quiet|harness/run.py|s/if ingesting and now - heard\[ac\] <= ACTIVE_MS:/if ingesting:/"
   "harness: divergence treats a missing aircraft as agreement|harness/run.py|s/len\(\{value\(t, ac\) for t in held\}\) > 1/len({value(t, ac) for t in held} - {None}) > 1/"
   "harness: catch-up ignores what was reported by the heal|harness/run.py|s/\.get\(\"at\", 0\) >= at$/.get(\"at\", 0) >= 0/m"
   "harness: bytes per useful update divides by every report|harness/run.py|s/useful = round\(sent \/ totals\[\"merge_applied\"\], 1\)/useful = round(sent \/ ingest, 1)/"
   "harness: propagation ignores the first receipt|harness/run.py|s/out\.append\(now - q\.pop\(0\)\[1\]\)/out.append(now - q.pop(0)[0])/"
   "harness: receipts keep the last receipt, not the first|harness/run.py|s/first\[key\] = min\(first\.get\(key, got\), got\)/first[key] = got/"
   "harness: settle ignores unequal hashes|harness/run.py|s/and len\(\{p\.states\[n\]\[\"hash\"\] for n in run\.nodes\}\) == 1/and True/"
+  # W3: the harness's published columns, its smoke gate, its labels and its reads of a node
+  "harness: staleness counts an aircraft from its observation, not its receipt|harness/run.py|s/heard\[ac\] = max\(heard\.get\(ac, 0\), receipt\.get\(\(ac, own\), own\)\)/heard[ac] = max(heard.get(ac, 0), own)/"
 )
 
 work="$(mktemp -d)"
