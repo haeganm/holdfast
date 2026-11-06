@@ -82,13 +82,29 @@ func run(ctx context.Context, args []string) error {
 	if (*trace == "" && *live == "") != (*coverage == "") {
 		return errors.New("-coverage goes with -trace or -live-url")
 	}
+	if *timeout <= 0 {
+		return fmt.Errorf("-sync-timeout %v: must be positive", *timeout)
+	}
+	if *traceMS < 0 {
+		return fmt.Errorf("-trace-ms %d: must not be negative", *traceMS)
+	}
+	if *from < 0 {
+		return fmt.Errorf("-trace-from-ms %d: must not be negative", *from)
+	}
+	// From a start long past, every report would be due at once.
+	if late := time.Since(time.UnixMilli(*t0)); *t0 != 0 && late > 5*time.Second {
+		return fmt.Errorf("-t0 %d is %v in the past", *t0, late.Round(time.Second))
+	}
+	if *live != "" {
+		if _, err := baseURL("-live-url", *live); err != nil {
+			return err
+		}
+	}
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	var peerList []string
-	for p := range strings.SplitSeq(*peers, ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			peerList = append(peerList, strings.TrimRight(p, "/"))
-		}
+	peerList, err := peerURLs(*peers)
+	if err != nil {
+		return err
 	}
 	client := &http.Client{Timeout: *timeout}
 	if *cloud != "" {
@@ -144,6 +160,12 @@ func run(ctx context.Context, args []string) error {
 		all, err := replay.Open(*trace)
 		if err != nil {
 			return err
+		}
+		// A window can hold no reports in this node's coverage, as some
+		// windows of the recorded hour do for some sensors, but it has to
+		// start inside the trace.
+		if len(all) == 0 || *from > all[len(all)-1].TMS {
+			return fmt.Errorf("-trace-from-ms %d: %s has no records from there on", *from, *trace)
 		}
 		for _, r := range replay.Window(all, *from, *traceMS) {
 			if r.For(*id) && circle.Contains(r.Lat, r.Lon) {
@@ -234,17 +256,50 @@ func ingestLive(ctx context.Context, n *node.Node, log *slog.Logger, circle repl
 	log.Info("live ingest stopped")
 }
 
+// baseURL checks a URL that request paths are appended to: http or https,
+// with a host, and nothing a path can't follow. A user's password would also
+// end up in the logs.
+func baseURL(name, raw string) (*url.URL, error) {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || strings.ContainsAny(raw, "?#") {
+		return nil, fmt.Errorf("%s %q: want an http or https base URL, with a host and no user, query or fragment", name, raw)
+	}
+	return u, nil
+}
+
+// peerURLs parses -peers, each peer once: a second sync loop to the same
+// peer would only double the traffic.
+func peerURLs(list string) ([]string, error) {
+	var peers []string
+	var seen []*url.URL
+	for p := range strings.SplitSeq(list, ",") {
+		if p = strings.TrimSpace(p); p == "" {
+			continue
+		}
+		u, err := baseURL("-peers", p)
+		if err != nil {
+			return nil, err
+		}
+		if slices.ContainsFunc(seen, func(s *url.URL) bool { return sameHost(s, u) }) {
+			return nil, fmt.Errorf("-peers names %s twice", u.Host)
+		}
+		seen = append(seen, u)
+		peers = append(peers, strings.TrimRight(p, "/"))
+	}
+	return peers, nil
+}
+
 // cloudURL checks a -cloud-peer URL. The token goes with every request to it,
 // so the link must be https, unless the peer has a private IP address, as the
 // harness's local cloud peer does.
 func cloudURL(raw string) (*url.URL, error) {
-	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" {
-		return nil, fmt.Errorf("-cloud-peer %q: want a base URL such as https://abc123.execute-api.us-east-1.amazonaws.com", raw)
+	u, err := baseURL("-cloud-peer", raw)
+	if err != nil {
+		return nil, err
 	}
 	ip := net.ParseIP(u.Hostname())
 	private := ip != nil && (ip.IsPrivate() || ip.IsLoopback())
-	if u.Scheme != "https" && (u.Scheme != "http" || !private) {
+	if u.Scheme == "http" && !private {
 		return nil, fmt.Errorf("-cloud-peer %q: the token would cross the network in the clear; use https (http only to a private IP)", raw)
 	}
 	return u, nil

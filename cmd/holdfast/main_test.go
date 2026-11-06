@@ -6,7 +6,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -88,6 +92,71 @@ func TestTheTokenNeverCrossesAProxyInTheClear(t *testing.T) {
 	}
 }
 
+func writeTrace(t *testing.T, lines ...string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "trace.jsonl")
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+const twoRecords = `{"t_ms":0,"icao":"A1B2C3","lat":39,"lon":-77,"alt":0,"gs":0,"hdg":0}
+{"t_ms":1000,"icao":"A1B2C3","lat":39,"lon":-77,"alt":0,"gs":0,"hdg":0}`
+
+// Each of these used to start a node that quietly did nothing useful.
+func TestBadFlagsAreRefusedAtStartup(t *testing.T) {
+	trace := writeTrace(t, twoRecords)
+	t.Setenv("HOLDFAST_CLOUD_TOKEN", "tok")
+	stopped, cancel := context.WithCancel(context.Background())
+	cancel() // a node that does start stops at once
+	for _, c := range []struct {
+		why, want string
+		args      []string
+	}{
+		{"a peer with no scheme", "-peers", []string{"-peers", "b:8080"}},
+		{"a peer that isn't http", "-peers", []string{"-peers", "ftp://b:8080"}},
+		{"a peer with a query", "-peers", []string{"-peers", "http://b:8080?x=1"}},
+		{"the same peer twice", "twice", []string{"-peers", "http://b:8080,http://B:8080/"}},
+		{"no sync timeout", "-sync-timeout", []string{"-sync-timeout", "0"}},
+		{"a negative sync timeout", "-sync-timeout", []string{"-sync-timeout", "-1s"}},
+		{"a negative trace length", "-trace-ms", []string{"-trace", trace, "-coverage", "39,-77,60", "-trace-ms", "-1"}},
+		{"a negative trace offset", "-trace-from-ms", []string{"-trace", trace, "-coverage", "39,-77,60", "-trace-from-ms", "-1"}},
+		{"a trace offset past the last record", "-trace-from-ms", []string{"-trace", trace, "-coverage", "39,-77,60", "-trace-from-ms", "1001"}},
+		{"a start in 1970", "-t0", []string{"-trace", trace, "-coverage", "39,-77,60", "-t0", "1"}},
+		{"a live feed with no scheme", "-live-url", []string{"-live-url", "api.adsb.lol/v2/point", "-coverage", "39,-77,60"}},
+		{"NaN coverage", "coverage", []string{"-trace", trace, "-coverage", "NaN,NaN,60"}},
+	} {
+		err := run(stopped, append([]string{"-id", "a", "-listen", "127.0.0.1:0"}, c.args...))
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: run returned %v, want an error about %s", c.why, err, c.want)
+		}
+	}
+}
+
+// What the harness passes, a window with no reports for this node's coverage
+// among it, still starts.
+func TestTheHarnessFlagsStillStart(t *testing.T) {
+	trace := writeTrace(t, twoRecords)
+	t.Setenv("HOLDFAST_CLOUD_TOKEN", "tok")
+	stopped, cancel := context.WithCancel(context.Background())
+	cancel()
+	t0 := "-t0=" + strconv.FormatInt(time.Now().Add(10*time.Second).UnixMilli(), 10)
+	for _, args := range [][]string{
+		{"-peers=http://172.30.0.12:8080,http://172.30.0.13:8080", "-cloud-peer=", "-clock=hlc", "-sync-timeout=2s",
+			"-clock-offset-ms=0", "-trace=" + trace, "-trace-from-ms=1000", "-live-interval=18s", "-live-offset=0s",
+			"-coverage=39.0,-77.0,60", t0, "-trace-ms=50000"},
+		{"-peers=", "-cloud-peer=http://172.30.0.14:8080", "-live-url=https://api.adsb.lol/v2/point",
+			"-trace-from-ms=0", "-live-offset=6s", "-coverage=39.0,-76.2,60", t0, "-trace-ms=50000"},
+		{"-trace=" + trace, "-coverage=10,10,1", t0},
+		{"-peers=", "-clock=hlc", "-sync-timeout=2s"}, // the star's hub
+	} {
+		if err := run(stopped, append([]string{"-id", "a", "-listen", "127.0.0.1:0"}, args...)); err != nil {
+			t.Errorf("%q: %v", args, err)
+		}
+	}
+}
+
 func TestSameHostCatchesTheCloudPeerListedTwice(t *testing.T) {
 	parse := func(s string) *url.URL {
 		u, err := url.Parse(s)
@@ -120,6 +189,11 @@ func TestCloudURLKeepsTheTokenOffCleartextLinks(t *testing.T) {
 		"ftp://172.30.0.14":                                  false,
 		"172.30.0.14:8080":                                   false,
 		"https://":                                           false,
+		"https://abc.example/prod":                           true,  // a stage path is fine
+		"https://abc.example/prod?stage=1":                   false, // requests would go to ...?stage=1/sync
+		"https://abc.example/#x":                             false,
+		"http://10.0.0.1:8080?":                              false,
+		"https://u:pw@abc.example":                           false, // the password would land in the logs
 	} {
 		if _, err := cloudURL(raw); (err == nil) != ok {
 			t.Errorf("cloudURL(%q) = %v, want accepted=%v", raw, err, ok)
