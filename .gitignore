@@ -30,3 +30,6 @@ __pycache__/
 !/results/aborted-live-nocerts/
 /results/aborted-live-nocerts/*
 !/results/aborted-live-nocerts/summary.csv
+!/results/star-control/
+!/results/aws/
+/results/*/raw-invalid/
