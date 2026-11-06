@@ -38,8 +38,9 @@ variable "budget_usd" {
 }
 
 # Three edges syncing every second make 3 to 6 requests a second. The
-# throttle is there to cap what a stranger with the URL can run up, not to
-# slow the edges down.
+# throttle slows a stranger with the URL, not the edges. AWS applies it on a
+# best-effort basis, so it is a target, not a ceiling: what bounds the bill is
+# that the stack only lives for one sitting (README.md).
 variable "burst" {
   type    = number
   default = 20
