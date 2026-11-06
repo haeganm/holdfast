@@ -612,6 +612,88 @@ func TestCutOffBodyIsAbortedNotRejected(t *testing.T) {
 	}
 }
 
+// A sync response is an inbound message too. One that arrives whole and is
+// refused, for its size, its contents or what it asks for, counts as rejected
+// and changes nothing, as a refused request does. One cut off on the way, by
+// a dropped link or the client's timeout, was never judged: it is only a
+// failed round, as a cut-off request is only aborted. Loss can only cut a
+// response off, so a lossy run never moves rejected.
+func TestARefusedResponseIsRejectedButACutOffOneIsNot(t *testing.T) {
+	ts := hlc.Timestamp{WallMS: simStartMS}
+	valid := crdt.Track{Obs: obs(1), TS: ts, Origin: "b"}
+	far := valid
+	far.TS.WallMS += time.Hour.Milliseconds()
+	tooMany := make([]crdt.ICAO, maxEntries+1)
+	for i := range tooMany {
+		tooMany[i] = crdt.ICAO(fmt.Sprintf("%06X", i))
+	}
+	body := func(r syncResponse) string {
+		b, err := json.Marshal(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	// Every refused response below carries a valid track, so one that merged
+	// anything would show.
+	whole := body(syncResponse{HLC: ts, Tracks: map[crdt.ICAO]crdt.Track{"AAAAA3": valid}})
+	part := whole[:20]
+	newNode := func(c *http.Client) *Node {
+		n, err := New(Config{ID: "a", Now: func() time.Time { return time.UnixMilli(simStartMS) }, StartupHold: -1, Client: c})
+		if err != nil {
+			t.Fatal(err)
+		}
+		n.Ingest("AAAAA2", obs(simStartMS))
+		return n
+	}
+	check := func(t *testing.T, n *Node, url string, rejected int64) {
+		t.Helper()
+		if err := n.syncOnce(context.Background(), url); err == nil {
+			t.Fatal("the round succeeded")
+		}
+		if c := n.Counters(); c.Rejected != rejected || n.tracks.Len() != 1 {
+			t.Fatalf("rejected=%d with %d aircraft stored, want %d and 1", c.Rejected, n.tracks.Len(), rejected)
+		}
+	}
+	for _, tc := range []struct {
+		name     string
+		body     io.Reader
+		rejected int64
+	}{
+		{"track stamp an hour ahead", strings.NewReader(body(syncResponse{HLC: ts, Tracks: map[crdt.ICAO]crdt.Track{"AAAAA3": far}})), 1},
+		{"asks for more tracks than one message may carry", strings.NewReader(body(syncResponse{HLC: ts, Tracks: map[crdt.ICAO]crdt.Track{"AAAAA3": valid}, Want: tooMany})), 1},
+		{"unknown field", strings.NewReader(strings.TrimSuffix(whole, "}") + `,"admin":true}`), 1},
+		{"a string where the clock goes", strings.NewReader(`{"hlc":"soon","tracks":{},"want":null}`), 1},
+		{"complete body, truncated JSON", strings.NewReader(part), 1},
+		{"body over 4 MB", strings.NewReader(whole + strings.Repeat(" ", maxBody)), 1},
+		{"connection drops mid-body", io.MultiReader(strings.NewReader(part), brokenConn{}), 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			n := newNode(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(tc.body)}, nil
+			})})
+			check(t, n, "http://b", tc.rejected)
+		})
+	}
+	t.Run("client times out mid-body", func(t *testing.T) {
+		release := make(chan struct{})
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			io.Copy(io.Discard, r.Body)
+			w.Header().Set("Content-Length", fmt.Sprint(len(whole)))
+			io.WriteString(w, part)
+			w.(http.Flusher).Flush()
+			<-release
+		}))
+		defer srv.Close()
+		defer close(release)
+		n := newNode(&http.Client{Timeout: 500 * time.Millisecond})
+		check(t, n, srv.URL, 0)
+		if got := n.Counters().BytesIn; got != int64(len(part)) {
+			t.Fatalf("read %d bytes of the response, want the %d sent before it stalled", got, len(part))
+		}
+	})
+}
+
 // During the startup hold a node keeps its reports, the latest per aircraft
 // whatever order they arrive in, and stamps them as soon as the hold ends,
 // above every stamp that existed when it started.

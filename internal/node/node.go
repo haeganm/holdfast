@@ -553,14 +553,16 @@ func (n *Node) syncOnce(ctx context.Context, peer string) error {
 	if err := n.post(ctx, peer+"/sync", req, &resp); err != nil {
 		return err
 	}
+	// Checked before anything merges, so a refused response changes nothing.
+	if len(resp.Want) > maxEntries {
+		n.c.rejected.Add(1)
+		return fmt.Errorf("%s/sync asked for %d tracks, limit %d", peer, len(resp.Want), maxEntries)
+	}
 	if err := n.receive(resp.HLC, resp.Tracks); err != nil {
 		return fmt.Errorf("%s/sync response: %w", peer, err)
 	}
 	if len(resp.Want) == 0 {
 		return nil
-	}
-	if len(resp.Want) > maxEntries {
-		return fmt.Errorf("%s/sync asked for %d tracks, limit %d", peer, len(resp.Want), maxEntries)
 	}
 	push := pushRequest{From: n.id, HLC: n.clock.Now(), Tracks: n.tracks.Get(resp.Want)}
 	return n.post(ctx, peer+"/push", push, nil)
@@ -587,9 +589,15 @@ func (n *Node) post(ctx context.Context, url string, in, out any) error {
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	n.c.bytesIn.Add(int64(len(data)))
 	if err != nil {
+		// Cut off on the way, by a timeout or a dropped link: nothing judged
+		// it, so like a cut-off request it is not a rejection.
 		return fmt.Errorf("read response from %s: %w", url, err)
 	}
+	// The whole body arrived, so a response refused for its size or contents
+	// is a bad message, counted as a request's would be. A status that isn't
+	// 2xx is the peer refusing this node, not the other way round.
 	if len(data) > maxBody {
+		n.c.rejected.Add(1)
 		return fmt.Errorf("response from %s exceeds %d bytes", url, maxBody)
 	}
 	if resp.StatusCode/100 != 2 {
@@ -601,6 +609,7 @@ func (n *Node) post(ctx context.Context, url string, in, out any) error {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(out); err != nil {
+		n.c.rejected.Add(1)
 		return fmt.Errorf("decode response from %s: %w", url, err)
 	}
 	return nil
