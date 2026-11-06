@@ -39,11 +39,11 @@ Each node keeps a map from aircraft to a last-writer-wins register stamped with 
 
 - every pair of nodes eventually completes a sync round, directly or through other nodes
 - the spread between the fastest and slowest physical clock stays under the max drift (5 s by default), since a node rejects stamps further ahead of its own clock than that
-- the picture stays at or under 10,000 aircraft, the most one digest may carry. An aircraft nobody has reported for 5 minutes expires on every node, which keeps a live picture far below that.
+- the live picture has at most 10,000 aircraft, the most one digest may carry. A replica never holds more: once full it refuses new aircraft until expiry makes room. An aircraft nobody has reported for 5 minutes expires on every node, which keeps a live picture far below that.
 
 A lost exchange is never retried. The next tick is the retry, 1 s after a round ends, which is safe because every exchange is idempotent. A restarted node holds its own reports for the max drift before stamping them, so nothing it stamps can sort below what its previous run wrote.
 
-The cloud peer ([`cloud/`](cloud)) is a node behind API Gateway and a Go Lambda, with the picture in DynamoDB. Each request scans the table, rebuilds a node from it, runs that node's own HTTP handler, and writes back every track that changed with a conditional put that only lets a greater track in (or a valid one over an item that no longer decodes). `crdt.Ord` encodes the merge order as a string DynamoDB can compare, so concurrent invocations and retried writes can only move an item up. [`cloud/terraform`](cloud/terraform) creates it on demand with nothing provisioned, so it costs nothing while idle. Edges send it a bearer token through `-cloud-peer`, which sends the token to that host only, and only over https or to a private address.
+The cloud peer ([`cloud/`](cloud)) is a node behind API Gateway and a Go Lambda, with the picture in DynamoDB. Each request scans the table, rebuilds a node from it, runs that node's own HTTP handler, and writes back every track that changed with a conditional put that only lets a greater track in (or a valid one over a corrupt item: one that doesn't decode, whose ord isn't its track's, or that no clock would accept). `crdt.Ord` encodes the merge order as a string DynamoDB can compare, so concurrent invocations and retried writes can only move an item up. [`cloud/terraform`](cloud/terraform) creates it on demand with nothing provisioned, so it costs nothing while idle. Edges send it a bearer token through `-cloud-peer`, which sends the token to that host only, and only over https or to a private address, never through a proxy in the clear.
 
 [docs/DESIGN.md](docs/DESIGN.md) has the layers, every invariant with the test that enforces it, and what happens under each kind of failure.
 
@@ -57,7 +57,7 @@ Three edge nodes with 60 km coverage circles. a sits 69 km from each of the othe
 
 Where reports come from:
 
-- **The recorded hour**: [`traces/adsb-2026-11-05.jsonl.gz`](traces/adsb-2026-11-05.jsonl.gz), from adsb.lol, 2026-11-05 18:17 to 19:17 UTC. 28,160 reports of 444 aircraft, 71% of them seen by two or more sensors. The recorder asked the feed for one 70 nm circle around all three sensors every 3 s, handing each answer to the next sensor in turn. That was about twice what the feed answers (10 requests a minute), so the recording is bursty: nearly every minute, about 27 s of answers, then about 33 s waiting out a refusal (68 of 669 requests failed). So a sensor heard its circle every 9 s at the median but every 18 s on average, and 55% of the hour falls in gaps over 6 s with no report from anyone. The feed's delay from observation to receipt was 0.89 s median and 22 s at p99, mostly aircraft on the ground, whose positions update rarely: 76% of the reports over 20 s old were on the ground or moving under 40 kt. Under the ODbL, see [traces/NOTICE](traces/NOTICE).
+- **The recorded hour**: [`traces/adsb-2026-11-05.jsonl.gz`](traces/adsb-2026-11-05.jsonl.gz), from adsb.lol, 2026-11-05 18:17 to 19:17 UTC. 28,160 reports of 444 aircraft, 71% of them seen by two or more sensors. The recorder asked the feed for one 70 nm circle around all three sensors every 3 s, handing each answer to the next sensor in turn. That was about twice what the feed answers (10 requests a minute), so the recording is bursty: nearly every minute, about 27 s of answers, then about 33 s waiting out a refusal (68 of 669 requests failed). One request every 6 s, the pace of the live and AWS runs, drew no failures. So a sensor heard its circle every 9 s at the median but every 18 s on average, and 55% of the hour falls in gaps over 6 s with no report from anyone. The feed's delay from observation to receipt was 0.89 s median and 22 s at p99, mostly aircraft on the ground, whose positions update rarely: 76% of the reports over 20 s old were on the ground or moving under 40 kt. Under the ODbL, see [traces/NOTICE](traces/NOTICE).
 - **Live**: each edge polls adsb.lol for its own circle every 18 s, the three 6 s apart.
 - **Synthetic**: [`traces/seed1.jsonl`](traces/seed1.jsonl), 40 aircraft reporting once a second, 16 of them seen by two nodes. Ground truth is exact, and two nodes that cover an aircraft ingest the identical report at the same moment.
 
@@ -167,7 +167,7 @@ Graded against [docs/predictions-2.md](docs/predictions-2.md) as registered (com
 
 ## Results: live traffic
 
-Source: [`results/live/summary.csv`](results/live/summary.csv), commit 4848211, three runs per configuration on the live feed from 21:44 to 21:55 UTC on 2026-11-05, 93 to 102 aircraft per run. A first live sweep at d78938d is kept in [`results/aborted-live-nocerts`](results/aborted-live-nocerts/summary.csv): the node image had no CA certificates, so its 2 runs ingested nothing, and it was stopped and rerun at 4848211, which added them. Each edge asks the feed for its circle every 18 s, so its reports arrive a circle at a time. In these runs an edge's first poll came a full interval in, so each edge polled twice in its 50 s window, first at its offset plus 18 s. Medians, with min-max over runs; times in ms.
+Source: [`results/live/summary.csv`](results/live/summary.csv), commit 4848211, three runs per configuration on the live feed from 21:44 to 21:55 UTC on 2026-11-05, 93 to 102 aircraft per run. A first live sweep at d78938d is kept in [`results/aborted-live-nocerts`](results/aborted-live-nocerts/summary.csv): the node image had no CA certificates, so its 2 runs ingested nothing, and it was stopped and rerun at 4848211, which added them. Each edge asks the feed for its circle every 18 s, so its reports arrive a circle at a time. In these runs each edge's first poll came one interval after its offset instead of at it, a bug since fixed, so each edge polled twice in its 50 s window: at about 18 and 36 s (a), 24 and 42 s (b), and 30 and 48 s (c), 6 polls a run where the schedule meant 9. Medians, with min-max over runs; times in ms.
 
 | configuration | settled | aircraft | prop p50 | prop p95 | feed delay p50 | staleness p50 | staleness p99 | catch-up | merged during the cut |
 |---|---|---|---|---|---|---|---|---|---|
@@ -315,11 +315,12 @@ What the data says:
 - Property tests on the clock and the map: commutative, associative and idempotent merge, Compare a total order, convergence by digest exchange.
 - `TestSimulation`: three or four nodes in one goroutine on fake clocks, every fault drawn from a seed (lost, delayed, duplicated and cut-off messages, partitions, clock jumps both ways, restarts that wipe a node), invariants checked after every step. A failure replays from its seed. It found two bugs before any measurement saw them.
 - Fuzzing: both sync handlers and the ADS-B parser.
-- `scripts/mutants.sh`: 68 planted bugs in the clock, the map, the node, the edge, the cloud peer, the feed reader and the harness's own arithmetic. The gate fails if the tests miss any, and it checks the unmutated tests pass first.
+- `scripts/mutants.sh`: 129 planted bugs in the clock, the map, the node, the edge, the cloud peer, the feed reader and the harness's own arithmetic. The gate fails if the tests miss any, and it checks the unmutated tests pass first.
 - The race detector, `staticcheck` and `govulncheck`.
-- The cloud peer against DynamoDB Local, including concurrent writes, paging, corrupt items and a store failure partway through a request; the Lambda binary in AWS's own runtime image.
+- The cloud peer against DynamoDB Local, including concurrent writes, paging, corrupt items of every attribute type, an instance whose clock runs behind another's, and a store failure partway through a request; a linux/amd64 build of the Lambda binary in AWS's own runtime image, refusing a wrong token and none (the linux/arm64 build Terraform deploys is cross-compiled, not run).
+- `internal/layering_test.go`: the dependency rules [docs/DESIGN.md](docs/DESIGN.md) describes, enforced.
 - Terraform: `fmt`, `validate`, 6 plan tests with a mocked provider, a Trivy scan.
-- The harness: 38 tests of its own arithmetic, and a smoke run with a clean run, a partition that has to heal, and a run through the cloud peer with its token.
+- The harness: 49 tests of its own arithmetic and of this README's tables, and a smoke run with a clean run, a partition that has to heal, and a run through the cloud peer with its token.
 
 `./check.sh` runs all of it. CI runs on every push to main and every pull request.
 
