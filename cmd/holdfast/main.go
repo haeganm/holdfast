@@ -208,8 +208,8 @@ func run(ctx context.Context, args []string) error {
 
 // shutdown stops srv, giving open requests up to budget to finish. A peer's
 // upload still arriving over a slow link can outlast it (the read timeout is
-// longer), so then the rest are cut off: a peer's next round resends
-// whatever didn't land, so a stop never loses anything.
+// longer), so then the rest are cut off. That loses nothing: the peer still
+// holds what it was sending.
 func shutdown(srv *http.Server, budget time.Duration, log *slog.Logger) error {
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
