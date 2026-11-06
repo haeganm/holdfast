@@ -94,9 +94,9 @@ tf fmt -check -recursive
 tf validate -no-color
 tf test -no-color
 
-step "terraform: Trivy misconfiguration scan"
+step "terraform: Trivy misconfiguration scan, with the checks built into the pinned image"
 MSYS_NO_PATHCONV=1 docker run --rm -v "$HERE/cloud/terraform:/tf:ro" -v holdfast-trivycache:/root/.cache/trivy \
-  "$TRIVY_IMAGE" config --exit-code 1 --skip-version-check --quiet /tf
+  "$TRIVY_IMAGE" config --exit-code 1 --skip-version-check --skip-check-update --quiet /tf
 
 step "harness unit tests"
 "$PY" -m unittest discover -s harness
