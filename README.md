@@ -341,7 +341,7 @@ What the data says:
 - Propagation, catch-up and recovery are upper bounds at 100 ms resolution, and on the synthetic trace lag moves in whole seconds because aircraft report once a second.
 - No authentication or TLS between edge nodes, so any host that can reach a node can write to it as any origin. The cloud peer has one shared bearer token. The digest checksum is 64-bit FNV, which is fine against accidents but not against a peer crafting collisions. All of this belongs with node identity, the next phase.
 - The cloud peer has one measured 10-minute run on AWS, at night with a dozen aircraft (an earlier one is set aside): not a load test, and its cost is computed from AWS's listed prices, since the bill itself lands hours later. [cloud/terraform/README.md](cloud/terraform/README.md) is the runbook.
-- The raw polls behind the recorded-hour runs are not in the repo: they are the 52 MB release asset [recorded-hour-raw](https://github.com/haeganm/holdfast/releases/tag/recorded-hour-raw), SHA-256 `d3b83eff48101827ec2b298c28cc8942a6ed9d57769a3a503306215923c20a3e`. Extracted at the repo root, `--reanalyze` rebuilds both `summary.csv` files byte for byte.
+- The raw polls behind the recorded-hour runs are not in the repo: they are the 52 MB release asset [recorded-hour-raw](https://github.com/haeganm/holdfast/releases/tag/recorded-hour-raw), SHA-256 `d3b83eff48101827ec2b298c28cc8942a6ed9d57769a3a503306215923c20a3e`. Extract only its `results/` at the repo root (`tar -xf holdfast-recorded-hour-raw.tar results`; the copy of traces/NOTICE inside it predates this one), and `--reanalyze` rebuilds both `summary.csv` files byte for byte.
 
 ## Run it
 
@@ -356,7 +356,7 @@ python -I harness/run.py --family sync --repeats 5         # the synthetic sweep
 python -I harness/run.py --family clock --repeats 5
 python -I harness/run.py --smoke --obs                     # with Prometheus and Grafana on 127.0.0.1:3000
 python -I harness/run.py --reanalyze results/real-hour     # recompute summary.csv from raw/, no Docker; this
-                                                          # raw/ is the release asset, extracted at the repo root
+                                                          # raw/ is the release asset: tar -xf <it> results
 python -I harness/tcp_probe.py --out results/tcp-probe loss0:2s loss50:2s loss50:10s   # kernel TCP counters mid-run
 pip install -r harness/requirements.txt                    # matplotlib, for plot.py only
 python -I harness/run.py --reanalyze results/sweep-sync    # writes the polls/ plot.py's timeline reads
