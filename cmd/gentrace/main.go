@@ -8,11 +8,13 @@
 //
 // A recording makes one request stream for all sensors, over a circle that
 // encloses them, and hands each response to the next sensor in turn: three
-// sensors at -every 6s make one request every 2 s, which adsb.lol accepted
-// without refusals when this was written (faster drew 429s). Each report is
-// written to <out>.partial as it arrives, so a killed recording loses at
-// most the last minute; -finalize turns the partial file into the sorted,
-// gzipped trace.
+// sensors at -every 6s make one request every 2 s. That is more than adsb.lol
+// answers for one client. The recorded hour asked every 3 s and holds about
+// 10 answers a minute, in bursts, the rest refused; one request every 6 s
+// (three sensors at -every 18s) drew no refusals in the live and AWS runs.
+// Each report is written to <out>.partial as it arrives, so a killed
+// recording loses at most the last minute; -finalize turns the partial file
+// into the sorted, gzipped trace.
 package main
 
 import (
