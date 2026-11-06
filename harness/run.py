@@ -461,12 +461,24 @@ def execute(run: Run, keep_obs: bool = False) -> None:
                 run.errors.append(f"cloud peer counters: {e}")
         if cfg.topology == "aws":
             # Never polled during the run (every poll is an invocation and a
-            # table scan); asked once at the end whether its table matches.
-            try:
-                with urllib.request.urlopen(authorized(env["CLOUD_PEER"] + "/hash", env["CLOUD_TOKEN"]), timeout=10) as r:
-                    run.extra["cloud_hash"] = json.load(r)
-            except (OSError, urllib.error.URLError) as e:
-                run.errors.append(f"cloud hash: {e}")
+            # table scan). At the end its hash is read beside the edges', a few
+            # times if they differ: each side expires an aircraft on its own
+            # tick, so for up to a second near an expiry they can disagree
+            # without holding anything different.
+            check: dict = {}
+            for tries in range(1, 6):
+                check["tries"] = tries
+                try:
+                    check["edges"] = {n: get_state(n)["hash"] for n in EDGES}
+                    with urllib.request.urlopen(authorized(env["CLOUD_PEER"] + "/hash", env["CLOUD_TOKEN"]), timeout=10) as r:
+                        check["cloud"] = json.load(r)
+                except (OSError, urllib.error.URLError) as e:
+                    run.errors.append(f"cloud hash: {e}")
+                    break
+                if set(check["edges"].values()) == {check["cloud"]["hash"]}:
+                    break
+                time.sleep(2)
+            run.extra["cloud_check"] = check
     finally:
         teardown(env, keep_obs)
 
@@ -512,11 +524,13 @@ def receipts_polled(polls: list[Poll]) -> tuple[dict[tuple[str, int], int], list
     one poll interval late."""
     first: dict[tuple[str, int], int] = {}
     for p in polls:
+        # The poll's first read, so a node read earlier in the same poll can't
+        # show the report arriving before it was received.
+        at = min(p.states[n]["now_ms"] for n in EDGES)
         for n in EDGES:
-            now = p.states[n]["now_ms"]
             for ac, tr in p.states[n]["tracks"].items():
                 if own := tr.get("own", 0):
-                    first[(ac, own)] = min(first.get((ac, own), now), now)
+                    first[(ac, own)] = min(first.get((ac, own), at), at)
     return first, sorted(got - obs for (_, obs), got in first.items())
 
 
@@ -773,7 +787,7 @@ def analyze(run: Run, polls_path: Path) -> dict:
     cut, heal = run.events.get("cut"), run.events.get("heal")
     ingest = totals.get("ingest_total", 0)
     wire = useful = ""
-    if "start" in run.tx and "end" in run.tx:
+    if "start" in run.tx and "end" in run.tx and run.cfg.topology != "aws":  # aws edges reach it over ctl, not the mesh
         sent = sum(run.tx["end"][n] - run.tx["start"][n] for n in run.nodes)
         if ingest:
             wire = round(sent / ingest, 1)
@@ -831,16 +845,19 @@ def cloud_columns(run: Run, ingest: int) -> dict:
     """The cloud peer's own counters for a run and its writes per report,
     and for a deployed peer whether its table ended equal to the edges'."""
     matches: bool | str = ""
-    if "cloud_hash" in run.extra and run.polls:
-        final = {run.polls[-1].states[n]["hash"] for n in EDGES}
-        matches = final == {run.extra["cloud_hash"]["hash"]}
+    tries: int | str = ""
+    check = run.extra.get("cloud_check")
+    if check and "cloud" in check:
+        matches = set(check["edges"].values()) == {check["cloud"]["hash"]}
+        tries = check["tries"]
     peer = run.extra.get("peer")
     if not peer:
         return {"cloud_requests": "", "cloud_writes": "", "cloud_won": "", "cloud_failed": "", "cloud_writes_per_report": "",
-                "cloud_matches": matches}
+                "cloud_matches": matches, "cloud_check_tries": tries}
     return {"cloud_requests": peer["requests"], "cloud_writes": peer["writes"], "cloud_won": peer["won"],
             "cloud_failed": peer["failed"],
-            "cloud_writes_per_report": round(peer["writes"] / ingest, 3) if ingest else "", "cloud_matches": matches}
+            "cloud_writes_per_report": round(peer["writes"] / ingest, 3) if ingest else "", "cloud_matches": matches,
+            "cloud_check_tries": tries}
 
 
 def dirty(root: Path) -> bool:

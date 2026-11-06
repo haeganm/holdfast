@@ -248,6 +248,12 @@ class LiveReceiptTest(unittest.TestCase):
             poll(1200, a=state(1200, mine), b=state(1200, {}), c=state(1200, {})),
         ]
         self.assertEqual(h.receipts(run, T0), ({("AAAAAA", T0 + 400): T0 + 1100}, [700]))
+        # read later in a poll than the others: the receipt is the poll's first read, never after a receiver's
+        late = [poll(1100, a=state(1103, mine), b=state(1100, {}), c=state(1101, {}))]
+        run.polls = late
+        self.assertEqual(h.receipts(run, T0)[0], {("AAAAAA", T0 + 400): T0 + 1100})
+        run.polls = [poll(1000, a=state(1000, {}), b=state(1000, {}), c=state(1000, {})),
+                     poll(1100, a=state(1100, mine), b=state(1100, {}), c=state(1100, {}))]
         synthetic = h.Run(h.Config("test", "mesh", "loss0", "hlc", 0), 0, duration_ms=10_000, settle_ms_window=0)
         synthetic.polls = run.polls
         self.assertEqual(h.receipts(synthetic, T0), ({}, []))
@@ -256,9 +262,10 @@ class LiveReceiptTest(unittest.TestCase):
 class AwsTest(unittest.TestCase):
     def run_with_hashes(self, edges, cloud):
         run = h.Run(h.Config("aws", "aws", "loss0", "hlc", 0, "live"), 0, 1000, 0)
-        run.polls = [poll(1000, **{n: state(1000, {}, hash_=x) for n, x in zip(h.EDGES, edges)})]
-        run.extra["cloud_hash"] = {"hash": cloud, "n": 0}
-        return h.cloud_columns(run, 10)["cloud_matches"]
+        run.extra["cloud_check"] = {"tries": 2, "edges": dict(zip(h.EDGES, edges)), "cloud": {"hash": cloud, "n": 0}}
+        cols = h.cloud_columns(run, 10)
+        self.assertEqual(cols["cloud_check_tries"], 2)
+        return cols["cloud_matches"]
 
     def test_the_deployed_peer_is_never_polled_and_must_end_equal(self):
         run = h.Run(h.Config("aws", "aws", "loss0", "hlc", 0, "live"), 0, 1000, 0)

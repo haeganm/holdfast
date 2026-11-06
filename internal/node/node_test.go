@@ -37,7 +37,12 @@ func (c cutTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	if c.self.cut.Load() {
 		return nil, errors.New("partitioned")
 	}
-	return c.base.RoundTrip(r)
+	resp, err := c.base.RoundTrip(r)
+	if err == nil && c.self.cut.Load() { // a cut that lands mid-request loses the reply too
+		resp.Body.Close()
+		return nil, errors.New("partitioned")
+	}
+	return resp, err
 }
 
 type spec struct {
@@ -545,7 +550,6 @@ func TestRestoreLeavesOutExpiredTracks(t *testing.T) {
 	}
 }
 
-// A node with no peers has no sync rounds, and must still expire.
 // A partition longer than the track TTL. Each side expires what it stopped
 // hearing about, as a lone node would. At the heal the fresh versions merge,
 // and a version one side has already expired is refused, so nothing comes
@@ -557,13 +561,15 @@ func TestAPartitionLongerThanTheTTLBringsNothingBack(t *testing.T) {
 	ns := startCluster(t, false, spec{id: "a", offset: -2 * time.Second, now: now, ttl: time.Minute},
 		spec{id: "b", now: now, ttl: time.Minute})
 	a, b := ns["a"], ns["b"]
-	a.Ingest("AAAAA1", obs(1)) // reported once, then never again
 	a.Ingest("BBBBB1", obs(2)) // a keeps hearing this one through the cut
+	a.Ingest("AAAAA1", obs(1)) // reported once, then never again
 	waitFor(t, "b to learn both aircraft", func() bool { return b.tracks.Len() == 2 })
+	// a's stamps only go up, so AAAAA1's is the later of the two, however far
+	// a sync from b moved a's clock between the ingests.
 	stamp := a.tracks.Snapshot()["AAAAA1"].TS.WallMS
 
 	b.cut.Store(true)
-	// Past AAAAA1's expiry on b's clock, not yet on a's, which runs 2 s slow.
+	// Past both on b's clock; not past AAAAA1 on a's, which runs 2 s slow.
 	nowMS.Store(stamp + time.Minute.Milliseconds() + 1000)
 	a.Ingest("BBBBB1", obs(3))
 	waitFor(t, "b, cut off, to expire both aircraft", func() bool { return b.tracks.Len() == 0 })
@@ -581,6 +587,7 @@ func TestAPartitionLongerThanTheTTLBringsNothingBack(t *testing.T) {
 	})
 }
 
+// A node with no peers has no sync rounds, and must still expire.
 func TestALoneNodeStillExpires(t *testing.T) {
 	var nowMS atomic.Int64
 	nowMS.Store(simStartMS)

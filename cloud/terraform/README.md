@@ -46,12 +46,15 @@ Credentials come from IAM Identity Center (`aws configure sso --profile holdfast
     (cd cloud && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -tags lambda.norpc -trimpath -o build/bootstrap .)
     export HOLDFAST_CLOUD_TOKEN=$(python -c "import secrets; print(secrets.token_hex(32))")
     tf init
-    tf apply -var peer_token="$HOLDFAST_CLOUD_TOKEN" -var alert_email=you@example.com
+    tf plan -var peer_token="$HOLDFAST_CLOUD_TOKEN" -var alert_email=you@example.com -out=demo.tfplan   # read it
+    tf apply demo.tfplan && rm cloud/terraform/demo.tfplan   # a saved plan carries the token
     export HOLDFAST_CLOUD_URL=$(tf output -raw api_url)
-    python -I harness/run.py --family aws --duration 600 --out results/aws
-    tf destroy -var peer_token="$HOLDFAST_CLOUD_TOKEN" -var alert_email=you@example.com
+    python -I harness/run.py --family aws --repeats 1 --duration 600 --out results/aws
+    tf destroy -auto-approve -var peer_token="$HOLDFAST_CLOUD_TOKEN" -var alert_email=you@example.com
 
-The harness run is three edges on live ADS-B that relay only through the deployed peer. It never polls the peer during the run, since each poll would be an invocation and a table scan; at the end it asks the peer for its hash once, and `cloud_matches` in `summary.csv` says whether the table ended equal to the edges. Invocations, durations, cold starts and throttles come from CloudWatch for the run's window.
+The container has no terminal, so Terraform can't ask for a yes: apply takes the saved plan, which is what was read, and destroy takes `-auto-approve`.
+
+The harness run is three edges on live ADS-B that relay only through the deployed peer. It never polls the peer during the run, since each poll would be an invocation and a table scan; at the end it reads the peer's hash beside the edges' (up to five times, since each side expires an aircraft on its own tick), and `cloud_matches` in `summary.csv` says whether the table ended equal to the edges. Invocations, durations, cold starts and throttles come from CloudWatch for the run's window.
 
 ## Tests
 

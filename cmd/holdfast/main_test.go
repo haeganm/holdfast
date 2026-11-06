@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -35,6 +36,27 @@ func TestTheTokenGoesOnlyToTheCloudPeer(t *testing.T) {
 	}
 	if got["cloud"] != "Bearer tok" || got["edge"] != "" {
 		t.Fatalf("the cloud peer got %q and an edge peer got %q; only the cloud peer should get the token", got["cloud"], got["edge"])
+	}
+}
+
+func TestSameHostCatchesTheCloudPeerListedTwice(t *testing.T) {
+	parse := func(s string) *url.URL {
+		u, err := url.Parse(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return u
+	}
+	cloud := parse("https://abc123.execute-api.us-east-1.amazonaws.com")
+	for raw, same := range map[string]bool{
+		"https://ABC123.execute-api.us-east-1.amazonaws.com":          true,
+		"https://abc123.execute-api.us-east-1.amazonaws.com:443/prod": true,
+		"http://abc123.execute-api.us-east-1.amazonaws.com":           false, // port 80
+		"https://other.example":                                       false,
+	} {
+		if sameHost(parse(raw), cloud) != same {
+			t.Errorf("sameHost(%q, cloud) = %v, want %v", raw, !same, same)
+		}
 	}
 }
 

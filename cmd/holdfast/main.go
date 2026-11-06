@@ -94,8 +94,10 @@ func run() error {
 			return errors.New("-cloud-peer needs its token in HOLDFAST_CLOUD_TOKEN")
 		}
 		base := strings.TrimRight(*cloud, "/")
-		if slices.Contains(peerList, base) {
-			return fmt.Errorf("%s is in -peers too; give the cloud peer only in -cloud-peer", base)
+		for _, p := range peerList {
+			if pu, err := url.Parse(p); err == nil && sameHost(pu, u) {
+				return fmt.Errorf("%s in -peers is the cloud peer; give it only in -cloud-peer", p)
+			}
 		}
 		client.Transport = bearer{next: http.DefaultTransport, scheme: u.Scheme, host: u.Host, token: token}
 		peerList = append(peerList, base)
@@ -234,6 +236,21 @@ func cloudURL(raw string) (*url.URL, error) {
 		return nil, fmt.Errorf("-cloud-peer %q: the token would cross the network in the clear; use https (http only to a private IP)", raw)
 	}
 	return u, nil
+}
+
+// sameHost reports whether two URLs name the same host and port, ignoring
+// case and a scheme's default port.
+func sameHost(a, b *url.URL) bool {
+	port := func(u *url.URL) string {
+		if p := u.Port(); p != "" {
+			return p
+		}
+		if strings.EqualFold(u.Scheme, "https") {
+			return "443"
+		}
+		return "80"
+	}
+	return strings.EqualFold(a.Hostname(), b.Hostname()) && port(a) == port(b)
 }
 
 // bearer adds the cloud peer's token to requests for that peer and no other.

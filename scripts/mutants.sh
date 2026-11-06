@@ -4,6 +4,8 @@
 # testing that behaviour.
 #
 # Each mutant: description | file | perl substitution applied to that file.
+# HOLDFAST_MUTANTS_ONLY=<regex> runs only the mutants whose description
+# matches, through the same build-then-test steps as the full run.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -53,14 +55,14 @@ mutants=(
   "cloud: a stored ord is trusted without checking|cloud/peer.go|s/if attr\(item, \"ord\"\) != crdt\.Ord\(t\) \{/if false \&\& attr(item, \"ord\") != crdt.Ord(t) {/"
   "cloud: a bad item can't be replaced|cloud/peer.go|s/\tswitch \{\n\tcase bad && badOrd != \"\":/\tswitch {\n\tcase false \&\& bad \&\& badOrd != \"\":/"
   "edge: the cloud token goes to every peer|cmd/holdfast/main.go|s/if r\.URL\.Scheme != b\.scheme \|\| r\.URL\.Host != b\.host \{/if false {/"
-  "edge: the cloud token may cross the network in the clear|cmd/holdfast/main.go|s/ \&\& \(u\.Scheme != \"http\" \|\| !private\)//"
+  "edge: the cloud token may cross the network in the clear|cmd/holdfast/main.go|s/private := ip != nil/private := true || ip != nil/"
   "harness: merge-order catch-up waits only on the lowest value|harness/run.py|s/due\[ac\] = max\(due\.get\(ac, merge_key\(tr\)\), merge_key\(tr\)\)/due[ac] = min(due.get(ac, merge_key(tr)), merge_key(tr))/"
   "harness: live propagation counts from the observation|harness/run.py|s/return receipts_polled\(run\.polls\)/return {}, []/"
   "harness: the sweep's own results mark the checkout dirty|harness/run.py|s/, \"--\", \"\.\", \":\(exclude\)results\"//"
-  "harness: a deployed peer's table always counts as matching|harness/run.py|s/matches = final == \{run\.extra\[\"cloud_hash\"\]\[\"hash\"\]\}/matches = True/"
+  "harness: a deployed peer's table always counts as matching|harness/run.py|s/matches = set\(check\[\"edges\"\]\.values\(\)\) == \{check\[\"cloud\"\]\[\"hash\"\]\}/matches = True/"
   "cloud: a failed write still answers success|cloud/peer.go|s/\tif err != nil \{\n\t\t\/\/ Nothing is lost/\tif false {\n\t\t\/\/ Nothing is lost/"
   "harness: a cloud peer left in the shell leaks into every run|harness/run.py|s/\"CLOUD_PEER\": \"\", \"CLOUD_TOKEN\": \"\",/\"CLOUD_UNUSED\": \"\",/"
-  "harness: the trace model counts a write lost even when it was older|harness/trace_stats.py|s/ and observed\(r\) > observed\(other\)://"
+  "harness: the trace model counts a write lost even when it was older|harness/trace_stats.py|s/ and observed\(r\) > observed\(other\):/:/"
   "adsb: backoff can undercut the interval|internal/adsb/adsb.go|s/return max\(min\(2\*last, maxBackoff\), every, retryAfter\)/return min(max(2*last, retryAfter), maxBackoff)/"
   "harness: full recovery ignores its floor|harness/run.py|s/if v > worst_floor:\n            start = None/if False:\n            start = None/"
   "harness: full recovery accepts a single dip|harness/run.py|s/if t - start >= SUSTAIN_MS:/if t - start >= 0:/"
@@ -113,6 +115,7 @@ fi
 failed=0
 for m in "${mutants[@]}"; do
   IFS='|' read -r desc file sub <<<"$m"
+  [[ -n "${HOLDFAST_MUTANTS_ONLY:-}" && ! "$desc" =~ $HOLDFAST_MUTANTS_ONLY ]] && continue
   copy
   before="$(sha256sum "$work/src/$file" | cut -d' ' -f1)"
   perl -0pi -e "$sub" "$work/src/$file"
