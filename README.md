@@ -317,7 +317,7 @@ What the data says:
 - Property tests on the clock and the map: commutative, associative and idempotent merge, Compare a total order, convergence by digest exchange.
 - `TestSimulation`: three or four nodes in one goroutine on fake clocks, every fault drawn from a seed (lost, delayed, duplicated and cut-off messages, partitions, clock jumps both ways, restarts that wipe a node), invariants checked after every step. A failure replays from its seed. It found two bugs before any measurement saw them.
 - Fuzzing: both sync handlers and the ADS-B parser.
-- `scripts/mutants.sh`: 129 planted bugs in the clock, the map, the node, the edge, the cloud peer, the feed reader and the harness's own arithmetic. The gate fails if the tests miss any, and it checks the unmutated tests pass first.
+- `scripts/mutants.sh`: 130 planted bugs in the clock, the map, the node, the edge, the cloud peer, the feed reader and the harness's own arithmetic. The gate fails if the tests miss any, and it checks the unmutated tests pass first.
 - The race detector, `staticcheck` and `govulncheck`, and a Trivy scan of both images for HIGH or CRITICAL vulnerabilities that already have a fix.
 - The cloud peer against DynamoDB Local, including concurrent writes, paging, corrupt items of every attribute type, an instance whose clock runs behind another's, and a store failure partway through a request; a linux/amd64 build of the Lambda binary in AWS's own runtime image, refusing a wrong token and none (the linux/arm64 build Terraform deploys is cross-compiled, not run).
 - `internal/layering_test.go`: the dependency rules [docs/DESIGN.md](docs/DESIGN.md) describes, enforced.
@@ -328,7 +328,7 @@ What the data says:
 
 ## Observability
 
-`run.py --obs` adds Prometheus, scraping the edges and the hub each second, and a provisioned Grafana dashboard. Here is a partition run, with c cut off:
+`run.py --obs` adds Prometheus, scraping the edges and the hub each second, and a provisioned Grafana dashboard, read-only on 127.0.0.1 with no login and no admin account. Here is a partition run, with c cut off:
 
 ![Grafana during a partition](docs/grafana-partition.png)
 
