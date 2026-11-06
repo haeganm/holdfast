@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -80,21 +81,29 @@ func TestTheTokenGoesOnlyToTheCloudPeer(t *testing.T) {
 }
 
 // Over http the token is in the clear, so a request to the cloud peer must
-// never go through a proxy, even one the environment sets. (Over https a
-// proxy would see only a CONNECT.)
+// never go through a proxy, even one HTTP_PROXY names. (Over https a proxy
+// would see only a CONNECT.) Go reads HTTP_PROXY once per process and never
+// proxies a loopback address, so the edge runs in a child process, its cloud
+// peer on a private address that nothing answers.
 func TestTheTokenNeverCrossesAProxyInTheClear(t *testing.T) {
-	proxy, cloud := newPeer(t), newPeer(t)
-	via, err := url.Parse(proxy.URL)
-	if err != nil {
-		t.Fatal(err)
+	if os.Getenv("HOLDFAST_TEST_PROXY_CHILD") != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := run(ctx, []string{"-id", "a", "-listen", "127.0.0.1:0", "-sync-interval", "20ms",
+			"-sync-timeout", "100ms", "-cloud-peer", "http://10.255.255.1:8080"}); err != nil {
+			t.Fatal(err)
+		}
+		return
 	}
-	saved := http.DefaultTransport
-	http.DefaultTransport = &http.Transport{Proxy: http.ProxyURL(via)} // what HTTP_PROXY would make of it
-	t.Cleanup(func() { http.DefaultTransport = saved })
-	t.Setenv("HOLDFAST_CLOUD_TOKEN", "tok")
-	runUntil(t, func() bool { return len(cloud.seen()) > 0 || len(proxy.seen()) > 0 }, "-cloud-peer", cloud.URL)
+	proxy := newPeer(t)
+	child := exec.Command(os.Args[0], "-test.run=^TestTheTokenNeverCrossesAProxyInTheClear$")
+	child.Env = append(os.Environ(), "HOLDFAST_TEST_PROXY_CHILD=1", "HOLDFAST_CLOUD_TOKEN=tok",
+		"HTTP_PROXY="+proxy.URL, "http_proxy="+proxy.URL, "NO_PROXY=", "no_proxy=", "REQUEST_METHOD=")
+	if out, err := child.CombinedOutput(); err != nil {
+		t.Fatalf("the edge: %v\n%s", err, out)
+	}
 	if got := proxy.seen(); len(got) > 0 {
-		t.Fatalf("a proxy got the cloud peer's requests, with Authorization %q", got)
+		t.Fatalf("the proxy got %d of the cloud peer's requests, the first with Authorization %q", len(got), got[0])
 	}
 }
 
