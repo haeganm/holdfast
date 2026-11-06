@@ -123,6 +123,8 @@ mutants=(
   "edge: an upload that outlasts the shutdown budget fails the stop|cmd/holdfast/main.go|s/\t\tsrv\.Close\(\)\n\t\treturn nil\n/\t\treturn err\n/"
   "edge: a recorded report's delay is added, not subtracted|cmd/holdfast/main.go|s/ObservedAtMS: start\.UnixMilli\(\) \+ r\.ObservedMS\(\)/ObservedAtMS: start.UnixMilli() + r.TMS + r.DelayMS/"
   "edge: nothing the live feed reports is ingested|cmd/holdfast/main.go|s/n\.Ingest\(r\.ICAO, r\.Obs\)/_ = r/"
+  "cloud: a short token is accepted in Lambda|cloud/main.go|s/if inLambda && len\(p\.token\) < 32 \{/if false \&\& len(p.token) < 32 {/"
+  "cloud: a table that can't be read answers with an empty picture|cloud/peer.go|s/http\.Error\(w, \"store unavailable\", http\.StatusServiceUnavailable\)\n\t\treturn\n\t\}\n\tif edge \{/stored, ords = map[crdt.ICAO]crdt.Track{}, map[crdt.ICAO]string{}\n\t}\n\tif edge {/"
   "replay: coverage lets a NaN through|internal/replay/trace.go|s/ok := c\.Lat >= -90 && c\.Lat <= 90 && c\.Lon >= -180 && c\.Lon <= 180 && c\.RadiusKm > 0/ok := !(c.Lat < -90 || c.Lat > 90 || c.Lon < -180 || c.Lon > 180) \&\& c.RadiusKm > 0/"
   "replay: coverage takes an infinite radius|internal/replay/trace.go|s/ && !math\.IsInf\(c\.RadiusKm, 1\)//"
   "replay: Read keeps a line's first record and drops the rest|internal/replay/trace.go|s/if strings\.TrimSpace\(text\[dec\.InputOffset\(\):\]\) != \"\" \{/if false {/"

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -130,19 +131,57 @@ func TestTokenIsRequired(t *testing.T) {
 	}
 }
 
+// In Lambda the token is all that keeps the internet out of the table, so a
+// short one must stop the function at start. Terraform checks it too, but
+// only on its own deploy path.
+func TestLambdaRefusesAShortToken(t *testing.T) {
+	t.Setenv("TABLE", "holdfast")
+	t.Setenv("AWS_PROFILE", "") // nothing on this machine may make the SDK's config fail instead
+	t.Setenv("AWS_CONFIG_FILE", filepath.Join(t.TempDir(), "none"))
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", filepath.Join(t.TempDir(), "none"))
+	for _, c := range []struct {
+		token        string
+		lambda, want bool
+	}{
+		{"", true, false},
+		{token[:31], true, false},
+		{token, true, true},
+		{"", false, true}, // a local run may go without one, and warns
+	} {
+		t.Setenv("PEER_TOKEN", c.token)
+		_, err := fromEnv(context.Background(), slog.New(slog.DiscardHandler), c.lambda)
+		if c.want && err != nil || !c.want && (err == nil || !strings.Contains(err.Error(), "PEER_TOKEN")) {
+			t.Errorf("a %d-character token, in Lambda %v: err %v, want accepted %v", len(c.token), c.lambda, err, c.want)
+		}
+	}
+}
+
+// A table that can't be read answers 503, not an empty picture.
+func TestATableThatCantBeReadAnswers503(t *testing.T) {
+	p := newPeer(t)
+	gone := &peer{db: p.db, table: p.table + "-gone", token: token, ttl: p.ttl, now: p.now, log: p.log}
+	rec := call(t, gone, http.MethodPost, "/sync", map[string]any{
+		"from": "b", "hlc": hlc.Timestamp{WallMS: time.Now().UnixMilli()}, "digest": map[crdt.ICAO]crdt.Version{}})
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("a sync while the table can't be read answered %d %s, want 503", rec.Code, rec.Body)
+	}
+}
+
 // DynamoDB decides each write by comparing ord strings. That has to agree
 // with crdt.Compare on every pair, or the table and the edges would settle
 // on different winners and never converge. This checks it against the real
-// query engine, not just Go's string order.
+// query engine, not just Go's string order, with logical parts of every
+// width a clock reaches (a sweep's stamps reach 38).
 func TestTheStoreKeepsWhatMergeKeeps(t *testing.T) {
 	p := newPeer(t)
 	r := rand.New(rand.NewPCG(1, 2))
 	small := []float64{-1.5, 0, 0.25, 39}
+	logical := []uint32{0, 1, 9, 15, 16, 255, 4096, hlc.MaxLogical}
 	gen := func() crdt.Track {
 		return crdt.Track{
 			Obs: crdt.Observation{Lat: small[r.IntN(4)], Lon: small[r.IntN(4)], AltFt: small[r.IntN(4)],
 				ObservedAtMS: int64(r.IntN(3))},
-			TS:     hlc.Timestamp{WallMS: 1_700_000_000_000 + int64(r.IntN(2)), Logical: uint32(r.IntN(2))},
+			TS:     hlc.Timestamp{WallMS: 1_700_000_000_000 + int64(r.IntN(2)), Logical: logical[r.IntN(len(logical))]},
 			Origin: []string{"a", "a-", "a0", "b"}[r.IntN(4)],
 		}
 	}
