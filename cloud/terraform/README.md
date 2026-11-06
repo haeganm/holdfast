@@ -50,14 +50,20 @@ Credentials come from IAM Identity Center (`aws configure sso --profile holdfast
     tf plan -out=demo.tfplan   # read it
     tf apply demo.tfplan; rm -f cloud/terraform/demo.tfplan   # a saved plan carries the token, so it goes whatever apply did
     export HOLDFAST_CLOUD_URL=$(tf output -raw api_url) HOLDFAST_CLOUD_TOKEN=$TF_VAR_peer_token
+    fn=$(tf output -raw function_name) tbl=$(tf output -raw table_name) lg=$(tf output -raw log_group)
+    api=${HOLDFAST_CLOUD_URL#https://}; api=${api%%.*}; in=results/aws/inputs
+    curl -s -o /dev/null -w '%{http_code}\n' -X POST "$HOLDFAST_CLOUD_URL/sync"   # no token: must print 401
+    start=$(date +%s000)
     python -I harness/run.py --family aws --repeats 1 --duration 600 --out results/aws
+    end=$(date +%s000)
+    MSYS_NO_PATHCONV=1 aws logs filter-log-events --log-group-name "$lg" --start-time "$start" --output json | gzip -n > $in/lambda-logs.json.gz   # the destroy deletes them
     tf destroy -auto-approve && rm -f cloud/terraform/terraform.tfstate cloud/terraform/terraform.tfstate.backup
-    bash scripts/aws_check.sh <work dir>   # nothing left in any service, then the run's CloudWatch metrics
+    bash scripts/aws_check.sh $in "$start" "$end" "$fn" "$tbl" "$api" | tee $in/teardown-check.txt   # nothing left, then the run's metrics
     aws sso logout
 
 `-e NAME` with no value hands the container the variable from this shell, so the token never appears on a command line. The container has no terminal, so Terraform can't ask for a yes: apply takes the saved plan, which is what was read, and destroy takes `-auto-approve`.
 
-The harness run is three edges on live ADS-B that relay only through the deployed peer. It never polls the peer during the run, since each poll would be an invocation and a table scan; at the end it reads the peer's hash beside the edges' (up to five times, since each side expires an aircraft on its own tick), and `cloud_matches` in `summary.csv` says whether the table ended equal to the edges. Invocations, durations, cold starts and throttles come from CloudWatch for the run's window.
+The harness run is three edges on live ADS-B that relay only through the deployed peer. It never polls the peer during the run, since each poll would be an invocation and a table scan; at the end it reads the peer's hash beside the edges' (up to five times, since each side expires an aircraft on its own tick), and `cloud_matches` in `summary.csv` says whether the table ended equal to the edges. Invocations and throttles come from CloudWatch for the run's window, durations and cold starts from the Lambda's own log lines, which is why they're saved before the destroy. [`scripts/aws_report.py`](../../scripts/aws_report.py) turned the 2026-11-06 sitting's exports into [`results/aws/aws-run.json`](../../results/aws/aws-run.json); it reads that sitting's files, two deploys included, so a new sitting would adapt it.
 
 ## Tests
 
