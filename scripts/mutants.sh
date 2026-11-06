@@ -128,6 +128,8 @@ mutants=(
   "replay: coverage lets a NaN through|internal/replay/trace.go|s/ok := c\.Lat >= -90 && c\.Lat <= 90 && c\.Lon >= -180 && c\.Lon <= 180 && c\.RadiusKm > 0/ok := !(c.Lat < -90 || c.Lat > 90 || c.Lon < -180 || c.Lon > 180) \&\& c.RadiusKm > 0/"
   "replay: coverage takes an infinite radius|internal/replay/trace.go|s/ && !math\.IsInf\(c\.RadiusKm, 1\)//"
   "replay: Read keeps a line's first record and drops the rest|internal/replay/trace.go|s/if strings\.TrimSpace\(text\[dec\.InputOffset\(\):\]\) != \"\" \{/if false {/"
+  # W1: the core's ord range, trust boundary, clock offset, counters, replica cap, hold and response refusals
+  "Ord pads the logical part too short|internal/crdt/track.go|s/\"%016x%08x\"/\"%016x%x\"/"
 )
 
 work="$(mktemp -d)"

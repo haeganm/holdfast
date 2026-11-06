@@ -92,14 +92,35 @@ func TestExpireCommutesWithMerge(t *testing.T) {
 
 // Ord must order exactly as Compare does, over the cases a string encoding
 // gets wrong: origins that are prefixes of each other, negative numbers,
-// -0 against +0, and ties on everything but one field.
+// -0 against +0, ties on everything but one field, and stamps on both sides
+// of every hex digit boundary, at real epoch walls. Clock-skew runs store
+// logical parts past 16, so an encoding that only holds below that is wrong
+// in practice.
 func TestOrdOrdersLikeCompare(t *testing.T) {
 	origins := []string{"a", "a-", "a0", "ab", "b", "z", "0", "-"}
 	nums := []float64{math.Inf(-1), -1e9, -1.5, -0.25, math.Copysign(0, -1), 0, 0.25, 1.5, 1e9, math.Inf(1)}
+	walls := []int64{0, 1, 1_700_000_000_000, 1_700_000_000_001}
+	logicals := []uint32{0, 1, 9, 15, 16, 255, 4096, hlc.MaxLogical}
+	// Every pair of stamps first, so the stamp encoding can't pass by luck.
+	var stamps []hlc.Timestamp
+	for _, w := range walls {
+		for _, l := range logicals {
+			stamps = append(stamps, hlc.Timestamp{WallMS: w, Logical: l})
+		}
+	}
+	for _, x := range stamps {
+		for _, y := range stamps {
+			a, b := Track{TS: x, Origin: "a"}, Track{TS: y, Origin: "a"}
+			if got, want := cmp.Compare(Ord(a), Ord(b)), Compare(a, b); got != want {
+				t.Fatalf("Ord orders stamp %v against %v as %d, Compare as %d", x, y, got, want)
+			}
+		}
+	}
 	prop := func(seed uint64) bool {
 		r := rng(seed)
 		num := func() float64 { return nums[r.IntN(len(nums))] }
 		a := genTrack(r)
+		a.TS = stamps[r.IntN(len(stamps))]
 		a.Origin = origins[r.IntN(len(origins))]
 		a.Obs.Lat, a.Obs.Lon, a.Obs.AltFt, a.Obs.GSKt, a.Obs.HeadingDeg = num(), num(), num(), num(), num()
 		a.Obs.ObservedAtMS = int64(r.IntN(5)) - 2
@@ -108,9 +129,9 @@ func TestOrdOrdersLikeCompare(t *testing.T) {
 		b := a
 		switch r.IntN(8) {
 		case 0:
-			b.TS.WallMS = int64(r.IntN(4))
+			b.TS.WallMS = walls[r.IntN(len(walls))]
 		case 1:
-			b.TS.Logical = uint32(r.IntN(2))
+			b.TS.Logical = logicals[r.IntN(len(logicals))]
 		case 2:
 			b.Origin = origins[r.IntN(len(origins))]
 		case 3:
