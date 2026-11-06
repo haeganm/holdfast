@@ -15,7 +15,7 @@ PY="${PY:-${PYTHON:-python3}}"  # check.sh exports PY
 export HOLDFAST_SIM_RUNS=200
 command -v "$PY" >/dev/null 2>&1 || PY=python
 mutants=(
-  "Put keeps the smaller track|internal/crdt/track.go|s/if ok && Compare\(cur, t\) >= 0 \{/if ok \&\& Compare(cur, t) <= 0 {/"
+  "Put keeps the smaller track|internal/crdt/track.go|s/if ok && Merge\(cur, t\) == cur \{/if ok \&\& Merge(cur, t) != cur {/"
   "Compare drops the content tie-break|internal/crdt/track.go|s/return cmp\.Or\(/return 0 * cmp.Or(/"
   "Diff ignores a stamp tie with different contents|internal/crdt/track.go|s/case mv\.Sum != theirs\.Sum:/case false:/"
   "Diff never asks for aircraft only the peer has|internal/crdt/track.go|s/want = append\(want, id\)\n\t\t\}\n\t\}\n\tslices/_ = id\n\t\t}\n\t}\n\tslices/"

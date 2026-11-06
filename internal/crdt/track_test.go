@@ -70,20 +70,20 @@ func TestExpireCommutesWithMerge(t *testing.T) {
 			b.Put(ICAO(fmt.Sprintf("A%05d", r.IntN(4))), genTrack(r))
 		}
 		merged := NewMap()
-		merged.MergeAll(a.Snapshot())
-		merged.MergeAll(b.Snapshot())
+		mergeAll(merged, a.Snapshot())
+		mergeAll(merged, b.Snapshot())
 		merged.Expire(cutoff)
 		a.Expire(cutoff)
 		b.Expire(cutoff)
 		separately := NewMap()
-		separately.MergeAll(a.Snapshot())
-		separately.MergeAll(b.Snapshot())
+		mergeAll(separately, a.Snapshot())
+		mergeAll(separately, b.Snapshot())
 		for _, t := range separately.Snapshot() {
 			if t.TS.WallMS < cutoff {
 				return false
 			}
 		}
-		return merged.Hash() == separately.Hash()
+		return HashOf(merged.Snapshot()) == HashOf(separately.Snapshot())
 	}
 	if err := quick.Check(prop, propertyConfig(t)); err != nil {
 		t.Fatal(err)
@@ -184,13 +184,20 @@ func TestPutKeepsTheGreaterTrack(t *testing.T) {
 	}
 }
 
+// mergeAll puts every track, as merging in a replica's whole state does.
+func mergeAll(m *Map, tracks map[ICAO]Track) {
+	for id, t := range tracks {
+		m.Put(id, t)
+	}
+}
+
 // exchange runs one round of the anti-entropy protocol between two replicas,
 // exactly as the node does over HTTP: a sends its digest, b answers with what
 // a is missing and names what it wants back, a sends that.
 func exchange(a, b *Map) {
 	newer, want := b.Diff(a.Digest())
-	a.MergeAll(newer)
-	b.MergeAll(a.Get(want))
+	mergeAll(a, newer)
+	mergeAll(b, a.Get(want))
 }
 
 // Convergence: however updates are split across replicas and whatever order
@@ -215,7 +222,7 @@ func TestReplicasConvergeThroughDigestExchange(t *testing.T) {
 				i, j := r.IntN(replicas), r.IntN(replicas)
 				if i != j {
 					exchange(reps[i], reps[j])
-					if reps[i].Hash() != reps[j].Hash() {
+					if HashOf(reps[i].Snapshot()) != HashOf(reps[j].Snapshot()) {
 						t.Logf("seed %d: replicas %d and %d differ right after exchanging", seed, i, j)
 						return false
 					}
@@ -235,7 +242,7 @@ func TestReplicasConvergeThroughDigestExchange(t *testing.T) {
 				t.Logf("seed %d: replica %d holds %d keys, truth %d, or values differ", seed, i, len(got), len(want))
 				return false
 			}
-			if rep.Hash() != truth.Hash() {
+			if HashOf(rep.Snapshot()) != HashOf(truth.Snapshot()) {
 				t.Logf("seed %d: replica %d hash differs from truth", seed, i)
 				return false
 			}
@@ -258,7 +265,7 @@ func TestStampTieWithDifferentContentsStillConverges(t *testing.T) {
 	a.Put("A00001", x)
 	b.Put("A00001", y)
 	exchange(a, b)
-	if a.Hash() != b.Hash() {
+	if HashOf(a.Snapshot()) != HashOf(b.Snapshot()) {
 		t.Fatalf("replicas differ after exchange: a=%+v b=%+v", a.Snapshot(), b.Snapshot())
 	}
 	if got := a.Snapshot()["A00001"]; got != Merge(x, y) {
@@ -270,7 +277,7 @@ func TestNegativeZeroHashesLikeZero(t *testing.T) {
 	a, b := NewMap(), NewMap()
 	a.Put("A00001", Track{Origin: "a", Obs: Observation{Lat: 0}})
 	b.Put("A00001", Track{Origin: "a", Obs: Observation{Lat: math.Copysign(0, -1)}})
-	if a.Hash() != b.Hash() {
+	if HashOf(a.Snapshot()) != HashOf(b.Snapshot()) {
 		t.Fatal("0 and -0 compare equal, so they must hash equal or replicas never look converged")
 	}
 }
@@ -282,15 +289,15 @@ func TestHashIgnoresInsertionOrder(t *testing.T) {
 		tracks[ICAO(fmt.Sprintf("B%05X", i))] = genTrack(r)
 	}
 	a, b := NewMap(), NewMap()
-	a.MergeAll(tracks)
+	mergeAll(a, tracks)
 	for _, id := range []ICAO{"B00031", "B00002", "B00017"} {
 		b.Put(id, tracks[id])
 	}
-	b.MergeAll(tracks)
-	if a.Hash() != b.Hash() {
+	mergeAll(b, tracks)
+	if HashOf(a.Snapshot()) != HashOf(b.Snapshot()) {
 		t.Fatal("same contents, different insertion order, different hash")
 	}
-	if a.Hash() == NewMap().Hash() {
+	if HashOf(a.Snapshot()) == HashOf(NewMap().Snapshot()) {
 		t.Fatal("hash of a non-empty map equals the empty map's")
 	}
 }

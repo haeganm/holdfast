@@ -46,8 +46,9 @@ var (
 	originRe = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
 )
 
-// Config describes a node. Zero values for SyncInterval, MaxDrift, Client,
-// Now and Logger get the defaults noted on each field.
+// Config describes a node. Zero values for SyncInterval, MaxDrift,
+// StartupHold, TrackTTL, Client, Now and Logger get the defaults noted on each
+// field.
 type Config struct {
 	ID           string        // short lowercase name, also the Origin of its writes
 	Peers        []string      // base URLs, such as http://172.30.0.12:8080
@@ -83,8 +84,9 @@ type Config struct {
 	// a live picture doesn't grow forever. A node also refuses an incoming
 	// track it has already expired and never asks a peer for one, so an
 	// expired version can't come back. Replicas agree on what has expired to
-	// within their clock spread. Default 5 minutes; negative keeps every
-	// track forever.
+	// within their clock spread plus one sync interval, since a node drops
+	// an expired aircraft on its next round. Default 5 minutes; negative
+	// keeps every track forever.
 	TrackTTL time.Duration
 
 	Client *http.Client     // default: 2s timeout
@@ -142,10 +144,12 @@ type Node struct {
 	log      *slog.Logger
 	c        counters
 
-	// mu serializes the two write paths, stamp-then-put and
-	// advance-clock-then-merge. Together they keep the invariant that every
-	// stamp in the replica is at or below the clock, so a local write under
-	// the HLC always sorts after everything this node has already seen.
+	// mu guards own and every write to the replica: stamping, merging,
+	// Restore and expiry. Stamp-then-put and advance-clock-then-merge each
+	// run whole under it, which keeps every stamp in the replica at or below
+	// the clock, so a local write under the HLC always sorts after everything
+	// this node has already seen. Snapshot takes it to read the replica, own
+	// and the counters together.
 	mu  sync.Mutex
 	own map[crdt.ICAO]int64 // latest ObservedAtMS this node ingested itself, per aircraft
 
@@ -711,7 +715,7 @@ func (r *syncRequest) from() string { return r.From }
 func (r *pushRequest) from() string { return r.From }
 
 // Hash is the hash of the current replica.
-func (n *Node) Hash() string { return n.tracks.Hash() }
+func (n *Node) Hash() string { return crdt.HashOf(n.tracks.Snapshot()) }
 
 func (n *Node) handleHash(w http.ResponseWriter, _ *http.Request) {
 	snap := n.tracks.Snapshot()
@@ -763,8 +767,9 @@ func (n *Node) Counters() Counters {
 	}
 }
 
-// handleMetrics writes the Prometheus text format by hand: a dozen series do
-// not justify the client library, the module's only dependency it would be.
+// handleMetrics writes the Prometheus text format by hand: one fixed list of
+// series doesn't justify the client library, the module's only dependency it
+// would be.
 func (n *Node) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	c := n.Counters()
 	last := n.clock.Peek()

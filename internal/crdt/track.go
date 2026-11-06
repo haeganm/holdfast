@@ -125,28 +125,19 @@ type Map struct {
 
 func NewMap() *Map { return &Map{m: map[ICAO]Track{}} }
 
-// Put merges t into the register for id. It reports whether t is now the
-// stored value, and returns the value it replaced or lost to (the zero Track
-// if the slot was empty). Redelivering the stored value is not a win.
+// Put merges t into the register for id: the slot ends up holding Merge of
+// what it held and t. It reports whether t is now the stored value, and
+// returns the value it replaced or lost to (the zero Track if the slot was
+// empty). Redelivering the stored value is not a win.
 func (m *Map) Put(id ICAO, t Track) (won bool, prev Track) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	cur, ok := m.m[id]
-	if ok && Compare(cur, t) >= 0 {
+	if ok && Merge(cur, t) == cur {
 		return false, cur
 	}
 	m.m[id] = t
 	return true, cur
-}
-
-// MergeAll puts every track and returns how many won.
-func (m *Map) MergeAll(tracks map[ICAO]Track) (won int) {
-	for id, t := range tracks {
-		if ok, _ := m.Put(id, t); ok {
-			won++
-		}
-	}
-	return won
 }
 
 // Digest summarizes the replica for a peer.
@@ -248,12 +239,8 @@ func (m *Map) Len() int {
 	return len(m.m)
 }
 
-// Hash returns a hex SHA-256 of the replica's contents. Two replicas have
+// HashOf returns a hex SHA-256 of a snapshot's contents. Two snapshots have
 // the same hash exactly when they hold equal tracks for the same aircraft.
-func (m *Map) Hash() string { return HashOf(m.Snapshot()) }
-
-// HashOf hashes a snapshot, so a caller can report a snapshot and its hash
-// consistently.
 func HashOf(tracks map[ICAO]Track) string {
 	ids := make([]ICAO, 0, len(tracks))
 	for id := range tracks {
