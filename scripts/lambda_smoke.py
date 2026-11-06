@@ -6,8 +6,9 @@ send it API Gateway HTTP API events, against DynamoDB Local.
 The image ships the Runtime Interface Emulator, so this exercises what the
 unit tests can't: the binary starts as a provided.al2023 bootstrap, speaks
 the Lambda runtime API, and handles payload 2.0 events end to end. It builds
-linux/amd64 so any runner can run it without CPU emulation; check.sh also
-cross-compiles the linux/arm64 binary Terraform deploys.
+a linux/amd64 binary and runs it in the image's linux/amd64 variant, so an
+x86-64 runner needs no CPU emulation. Terraform deploys the linux/arm64
+build, which check.sh only cross-compiles: nothing here runs that one.
 """
 
 from __future__ import annotations
@@ -69,10 +70,13 @@ def create_table() -> None:
             time.sleep(0.5)
 
 
-def event(method: str, path: str, body: dict | None = None, token: str = TOKEN) -> dict:
+def event(method: str, path: str, body: dict | None = None, token: str | None = TOKEN) -> dict:
+    headers = {"content-type": "application/json"}
+    if token is not None:
+        headers["authorization"] = f"Bearer {token}"
     return {
         "version": "2.0", "routeKey": "$default", "rawPath": path, "rawQueryString": "",
-        "headers": {"authorization": f"Bearer {token}", "content-type": "application/json"},
+        "headers": headers,
         "requestContext": {"http": {"method": method, "path": path, "sourceIp": "127.0.0.1"}},
         "body": json.dumps(body) if body is not None else "", "isBase64Encoded": False,
     }
@@ -104,7 +108,7 @@ def main() -> int:
         sh("docker", "run", "-d", "--name", DDB, "--network", NET, "-p", f"127.0.0.1:{DDB_PORT}:8000",
            DDB_IMAGE, "-jar", "DynamoDBLocal.jar", "-inMemory")
         create_table()
-        sh("docker", "run", "-d", "--name", FN, "--network", NET, "-p", f"127.0.0.1:{FN_PORT}:8080",
+        sh("docker", "run", "-d", "--name", FN, "--platform", "linux/amd64", "--network", NET, "-p", f"127.0.0.1:{FN_PORT}:8080",
            "-v", f"{build / 'bootstrap-amd64'}:/var/runtime/bootstrap:ro",
            "-e", f"TABLE={TABLE}", "-e", f"PEER_TOKEN={TOKEN}", "-e", f"AWS_ENDPOINT_URL_DYNAMODB=http://{DDB}:8000",
            "-e", "AWS_REGION=us-east-1", "-e", "AWS_ACCESS_KEY_ID=local", "-e", "AWS_SECRET_ACCESS_KEY=local",
@@ -116,6 +120,8 @@ def main() -> int:
         checks = []
         r = invoke(event("GET", "/hash", token="wrong-token-0123456789abcdef0123456789"))
         checks.append(("a wrong token is refused", r.get("statusCode") == 401, r))
+        r = invoke(event("GET", "/hash", token=None))
+        checks.append(("a request without a token is refused", r.get("statusCode") == 401, r))
         r = invoke(event("POST", "/push", {"from": "a", "hlc": {"w": now, "l": 0}, "tracks": {"ABCDEF": track}}))
         checks.append(("a push is stored", r.get("statusCode") == 204, r))
         r = invoke(event("GET", "/hash"))
@@ -131,7 +137,7 @@ def main() -> int:
         if failed:
             print(sh("docker", "logs", FN, check=False)[-2000:])
             return 1
-        print("lambda smoke: the binary runs in the Lambda runtime and round-trips through DynamoDB")
+        print("lambda smoke: the linux/amd64 binary runs in the Lambda runtime and round-trips through DynamoDB")
         return 0
     finally:
         cleanup()
