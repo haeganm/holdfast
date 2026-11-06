@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"strconv"
 	"sync"
@@ -103,10 +104,10 @@ func (p *peer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	// An item that doesn't decode, or that Restore refuses, still holds its
-	// key and its ord in the table. A valid write must be able to replace it,
-	// or a corrupt item that sorts high would block that aircraft for good.
-	bad = append(bad, n.Restore(stored)...)
+	// An item that doesn't decode, or that no clock would accept, still holds
+	// its key and its ord in the table. A valid write must be able to replace
+	// it, or a corrupt item that sorts high would block that aircraft for good.
+	bad = append(bad, corrupt(stored, n.Restore(stored))...)
 	replace := make(map[crdt.ICAO]string, len(bad))
 	for _, id := range bad {
 		replace[id] = ords[id]
@@ -138,6 +139,33 @@ func (p *peer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(resp.status)
 	w.Write(resp.body.Bytes())
+}
+
+// corrupt returns those of the refused aircraft whose stored track no clock
+// would accept. Restore also refuses a valid track only because its stamp is
+// past this instance's drift limit, as one written through an instance whose
+// clock reads ahead of this one's can be. That item isn't corrupt: the
+// ordinary condition decides it, or a slower instance would replace it with
+// a smaller track and move the table's value down. What a node with no drift
+// limit to speak of (292 years) and no expiry still refuses, time can't fix.
+func corrupt(stored map[crdt.ICAO]crdt.Track, refused []crdt.ICAO) []crdt.ICAO {
+	if len(refused) == 0 {
+		return nil
+	}
+	again := make(map[crdt.ICAO]crdt.Track, len(refused))
+	for _, id := range refused {
+		again[id] = stored[id]
+	}
+	return newNode(node.Config{ID: "cloud", MaxDrift: math.MaxInt64, StartupHold: -1, TrackTTL: -1}).Restore(again)
+}
+
+// newNode builds a node from a constant config, which can't fail.
+func newNode(cfg node.Config) *node.Node {
+	n, err := node.New(cfg)
+	if err != nil {
+		panic(err)
+	}
+	return n
 }
 
 // load reads the whole table. An item that does not decode, or whose ord

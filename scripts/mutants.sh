@@ -110,6 +110,8 @@ mutants=(
   "harness: the smoke gate passes a cloud table that ended different|harness/run.py|s/if row\[\"cloud_matches\"\] is False:/if False:/"
   # W2: the edge, the feed, the trace reader and the cloud peer
   "cloud: a bad item whose ord isn't a string can't be replaced|cloud/peer.go|s/cond \+= \" OR NOT attribute_type\(ord, :s\)\"\n\t\tvalues\[\":s\"\] = &types\.AttributeValueMemberS\{Value: \"S\"\}/cond += \" OR attribute_not_exists(ord)\"/"
+  "cloud: a valid item only ahead of this instance's clock counts as corrupt|cloud/peer.go|s/bad = append\(bad, corrupt\(stored, n\.Restore\(stored\)\)\.\.\.\)/bad = append(bad, n.Restore(stored)...)/"
+  "cloud: an item no clock would accept is never replaced|cloud/peer.go|s/\tif len\(refused\) == 0 \{\n\t\treturn nil\n\t\}/\tif true {\n\t\treturn nil\n\t}/"
 )
 
 work="$(mktemp -d)"

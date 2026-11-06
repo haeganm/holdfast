@@ -225,12 +225,12 @@ func TestABadItemIsSkipped(t *testing.T) {
 // A bad item still holds its key and ord. A valid write for that aircraft has
 // to replace it whatever it holds: a corrupt ord that sorts high, a valid
 // track with a mismatched ord, no ord at all, an ord that isn't a string, or
-// a track Restore refuses (a stamp far in the future). Otherwise the
-// aircraft is blocked for good.
+// a track no clock would accept (a stamp a thousand years ahead). Otherwise
+// the aircraft is blocked for good.
 func TestAValidWriteReplacesABadItem(t *testing.T) {
 	p := newPeer(t)
 	future := track(1, "b")
-	future.TS.WallMS += time.Hour.Milliseconds()
+	future.TS.WallMS += 1000 * 365 * 24 * time.Hour.Milliseconds()
 	futureJSON, _ := json.Marshal(future)
 	goodJSON, _ := json.Marshal(track(1, "b"))
 	bad := map[crdt.ICAO]map[string]types.AttributeValue{
@@ -253,6 +253,33 @@ func TestAValidWriteReplacesABadItem(t *testing.T) {
 	push(t, p, valid)
 	if got := stored(t, p); crdt.HashOf(got) != crdt.HashOf(valid) {
 		t.Fatalf("after a valid push the table holds %d good tracks of %d", len(got), len(valid))
+	}
+}
+
+// Restore refuses a stamp past this instance's drift limit. An instance whose
+// clock runs behind another's can read a valid track that way, one an edge
+// 4 s fast wrote through the other. That track isn't bad, so a smaller one
+// must not replace it, or the table's value moves down.
+func TestASlowerInstanceNeverMovesTheTableDown(t *testing.T) {
+	a := newPeer(t)
+	b := &peer{db: a.db, table: a.table, token: a.token, ttl: a.ttl, log: a.log, // the same table,
+		now: func() time.Time { return time.Now().Add(-2 * time.Second) }} // a clock 2 s behind a's
+	now := time.Now().UnixMilli()
+	hi := crdt.Track{Obs: crdt.Observation{Lat: 39, Lon: -77, ObservedAtMS: now}, TS: hlc.Timestamp{WallMS: now + 4000}, Origin: "a"}
+	lo := crdt.Track{Obs: crdt.Observation{Lat: 38, Lon: -76, ObservedAtMS: now}, TS: hlc.Timestamp{WallMS: now}, Origin: "c"}
+	for _, c := range []struct {
+		via  *peer
+		from string
+		tr   crdt.Track
+	}{{a, "a", hi}, {b, "c", lo}} {
+		rec := call(t, c.via, http.MethodPost, "/push", map[string]any{
+			"from": c.from, "hlc": hlc.Timestamp{WallMS: now - 2000}, "tracks": map[crdt.ICAO]crdt.Track{"ABCDEF": c.tr}})
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("push from %s: %d %s", c.from, rec.Code, rec.Body)
+		}
+	}
+	if got := stored(t, a)["ABCDEF"]; crdt.Compare(got, hi) != 0 {
+		t.Fatalf("the table held the track stamped %v and now holds the smaller one stamped %v", hi.TS, got.TS)
 	}
 }
 
