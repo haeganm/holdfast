@@ -17,7 +17,10 @@ func TestSensorFlag(t *testing.T) {
 	if s[0].id != "a" || s[0].circle != (replay.Circle{Lat: 39, Lon: -77, RadiusKm: 60}) {
 		t.Fatalf("parsed %+v", s[0])
 	}
-	for _, bad := range []string{"a=39.0,-77.0,60", "=39,-77,60", "b", "b=91,0,1"} {
+	// The ids become the trace's node names, so one the trace format refuses
+	// has to be refused here, not when the finished hour fails to read back.
+	for _, bad := range []string{"a=39.0,-77.0,60", "=39,-77,60", "b", "b=91,0,1",
+		"A=39,-77,60", "node 1=39,-77,60", "north_east=39,-77,60"} {
 		if err := s.Set(bad); err == nil {
 			t.Errorf("accepted %q", bad)
 		}

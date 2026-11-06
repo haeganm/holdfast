@@ -47,11 +47,12 @@ type sensor struct {
 
 func (s *sensors) String() string { return fmt.Sprint(*s) }
 
-// Set parses id=lat,lon,radius_km.
+// Set parses id=lat,lon,radius_km. The id names the sensor's node in the
+// trace, so it is checked now rather than when the trace is read back.
 func (s *sensors) Set(v string) error {
 	id, circle, ok := strings.Cut(v, "=")
-	if !ok || id == "" {
-		return fmt.Errorf("sensor %q: want id=lat,lon,radius_km", v)
+	if !ok || !replay.ValidNode(id) {
+		return fmt.Errorf("sensor %q: want id=lat,lon,radius_km, the id 1-32 of [a-z0-9-]", v)
 	}
 	c, err := replay.ParseCircle(circle)
 	if err != nil {

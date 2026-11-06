@@ -127,6 +127,9 @@ var (
 	nodeRe = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
 )
 
+// ValidNode reports whether id can name the node of a recorded report.
+func ValidNode(id string) bool { return nodeRe.MatchString(id) }
+
 // Open reads a trace file, gunzipping it if the name ends in .gz.
 func Open(path string) ([]Record, error) {
 	f, err := os.Open(path)
@@ -210,7 +213,7 @@ func check(r Record) error {
 	if r.Lat < -90 || r.Lat > 90 || r.Lon < -180 || r.Lon > 180 {
 		return fmt.Errorf("position %v,%v out of range", r.Lat, r.Lon)
 	}
-	if r.Node != "" && !nodeRe.MatchString(r.Node) {
+	if r.Node != "" && !ValidNode(r.Node) {
 		return fmt.Errorf("node %q: want 1-32 of [a-z0-9-]", r.Node)
 	}
 	if r.DelayMS < 0 || r.DelayMS > MaxDelay.Milliseconds() {
