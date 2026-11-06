@@ -33,3 +33,4 @@ __pycache__/
 !/results/star-control/
 !/results/aws/
 /results/*/raw-invalid/
+!/results/audit-control/
