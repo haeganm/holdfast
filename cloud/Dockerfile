@@ -11,7 +11,7 @@ RUN go mod download
 COPY cloud/*.go ./
 RUN CGO_ENABLED=0 go build -tags lambda.norpc -trimpath -ldflags="-s -w" -o /out/cloud .
 
-FROM debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
+FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
 # iproute2 for tc netem, so the harness can impair the relay's mesh link
 # like any node's; the peer itself runs unprivileged.
 RUN apt-get update \

@@ -104,4 +104,10 @@ step "harness unit tests"
 step "harness smoke: a clean run, a partition that must heal, the cloud relay with its token"
 "$PY" harness/run.py --smoke
 
+step "images: no HIGH or CRITICAL vulnerability that already has a fix (the smoke just built them)"
+for img in holdfast:dev holdfast-cloud:dev; do
+  MSYS_NO_PATHCONV=1 docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v holdfast-trivycache:/root/.cache/trivy \
+    "$TRIVY_IMAGE" image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed --scanners vuln --quiet "$img"
+done
+
 printf '\ncheck: all passed\n'
