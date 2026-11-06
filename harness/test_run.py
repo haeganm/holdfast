@@ -300,6 +300,10 @@ class TraceStatsTest(unittest.TestCase):
         recs = [self.rec(0, "a"), self.rec(1000, "b", delay=2000), self.rec(2000, "c")]
         self.assertEqual(ts.late_reports(recs, 0, 3000), 1)  # b's, observed at -1000, after a's at 0
 
+    def test_handoffs_count_the_next_report_after_c_by_another_node(self):
+        recs = [self.rec(0, "c"), self.rec(1000, "c"), self.rec(2000, "a"), self.rec(3000, "c"), self.rec(4000, "b")]
+        self.assertEqual(ts.handoffs_from(recs, 0, 5000), 2)
+
 
 class CommitLabelTest(unittest.TestCase):
     def test_only_source_changes_make_a_checkout_dirty(self):

@@ -42,6 +42,18 @@ def late_reports(recs: list[dict], lo: int, hi: int) -> int:
     return late
 
 
+def handoffs_from(recs: list[dict], lo: int, hi: int, node: str = "c") -> int:
+    """Times in [lo, hi) that the next report of an aircraft after one by
+    `node` came from a different node."""
+    last: dict[str, str] = {}
+    n = 0
+    for r in recs:
+        if lo <= r["t_ms"] < hi:
+            n += last.get(r["icao"]) == node and r["node"] != node
+            last[r["icao"]] = r["node"]
+    return n
+
+
 def expected_wall_losses(recs: list[dict], lo: int, hi: int, skew_ms: int, skewed: str = "c") -> int:
     """Writes a wall-clock node must lose in [lo, hi) when node `skewed` runs
     skew_ms off true time. A write loses when the value it meets carries a
@@ -97,7 +109,7 @@ def main() -> int:
     print("\nreal-base windows: late reports, and the wall clock's expected lost writes by c's skew")
     for lo, hi in REAL_BASE_WINDOWS:
         losses = {k: expected_wall_losses(recs, lo, hi, k) for k in (-4000, -2000, 2000, 4000)}
-        print(f"  from {lo // 1000:4d} s: late {late_reports(recs, lo, hi)}, lost " +
+        print(f"  from {lo // 1000:4d} s: late {late_reports(recs, lo, hi)}, handoffs from c {handoffs_from(recs, lo, hi)}, lost " +
               ", ".join(f"{k:+d} ms: {v}" for k, v in losses.items()))
     return 0
 
