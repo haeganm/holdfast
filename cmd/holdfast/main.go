@@ -106,7 +106,15 @@ func run(ctx context.Context, args []string) error {
 				return fmt.Errorf("%s in -peers is the cloud peer; give it only in -cloud-peer", p)
 			}
 		}
-		client.Transport = bearer{next: http.DefaultTransport, scheme: u.Scheme, host: u.Host, token: token}
+		// Over http the token is in the clear, so the cloud peer's requests
+		// never go through a proxy; over https a proxy sees only a CONNECT.
+		via := http.DefaultTransport
+		if u.Scheme == "http" {
+			direct := http.DefaultTransport.(*http.Transport).Clone()
+			direct.Proxy = nil
+			via = direct
+		}
+		client.Transport = bearer{next: http.DefaultTransport, cloud: via, scheme: u.Scheme, host: u.Host, token: token}
 		peerList = append(peerList, base)
 	}
 	n, err := node.New(node.Config{
@@ -257,10 +265,11 @@ func sameHost(a, b *url.URL) bool {
 	return strings.EqualFold(a.Hostname(), b.Hostname()) && port(a) == port(b)
 }
 
-// bearer adds the cloud peer's token to requests for that peer and no other.
-// Nothing authenticates edge peers, so a token sent to one would be anyone's.
+// bearer adds the cloud peer's token to requests for that peer and no other,
+// and sends those through cloud. Nothing authenticates edge peers, so a token
+// sent to one would be anyone's.
 type bearer struct {
-	next                http.RoundTripper
+	next, cloud         http.RoundTripper
 	scheme, host, token string
 }
 
@@ -270,5 +279,5 @@ func (b bearer) RoundTrip(r *http.Request) (*http.Response, error) {
 	}
 	r = r.Clone(r.Context()) // a RoundTripper must not change the caller's request
 	r.Header.Set("Authorization", "Bearer "+b.token)
-	return b.next.RoundTrip(r)
+	return b.cloud.RoundTrip(r)
 }
