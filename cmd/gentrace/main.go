@@ -8,10 +8,10 @@
 //
 // A recording makes one request stream for all sensors, over a circle that
 // encloses them, and hands each response to the next sensor in turn: three
-// sensors at -every 6s make one request every 2 s. That is more than adsb.lol
-// answers for one client. The recorded hour asked every 3 s and holds about
-// 10 answers a minute, in bursts, the rest refused; one request every 6 s
-// (three sensors at -every 18s) drew no refusals in the live and AWS runs.
+// sensors at the default -every 18s make one request every 6 s, which drew no
+// refusals in the live and AWS runs. adsb.lol answers one client only so
+// often: the recorded hour asked every 3 s and holds about 10 answers a
+// minute, in bursts, the rest refused.
 // Each report is written to <out>.partial as it arrives, so a killed
 // recording loses at most the last minute; -finalize turns the partial file
 // into the sorted, gzipped trace.
@@ -75,7 +75,7 @@ func main() {
 	var sens sensors
 	flag.Var(&sens, "sensor", "record a live feed for this node, id=lat,lon,radius_km (repeatable)")
 	feed := flag.String("feed", "https://api.adsb.lol/v2/point", "readsb-format feed; the sensor's lat/lon/radius_nm is appended")
-	every := flag.Duration("every", 6*time.Second, "how often each sensor observes")
+	every := flag.Duration("every", 18*time.Second, "how often each sensor observes")
 	finalize := flag.String("finalize", "", "turn PATH.partial left by a killed recording into PATH")
 	flag.Parse()
 
