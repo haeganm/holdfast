@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 import run as h
+import trace_stats as ts
 
 T0 = 1_000_000  # absolute ms of the trace start
 
@@ -277,6 +278,27 @@ class RunEnvTest(unittest.TestCase):
         self.assertEqual(cloud["CLOUD_PEER"], f"http://{h.IP['cloud']}:8080")
         self.assertEqual(len(cloud["CLOUD_TOKEN"]), 64)
         self.assertNotEqual(cloud["CLOUD_TOKEN"], "x" * 64)
+
+
+class TraceStatsTest(unittest.TestCase):
+    def rec(self, t, node, delay=0):
+        return {"t_ms": t, "icao": "AAAAAA", "node": node, "delay_ms": delay}
+
+    def test_a_fast_clock_costs_the_fresher_reports_that_follow_it_closely(self):
+        recs = [self.rec(0, "c"), self.rec(3000, "a"),                   # 3 s after c and fresher: lost at +4 s only
+                self.rec(10_000, "c"), self.rec(13_000, "a", delay=4000),  # 3 s after, but observed before c's
+                self.rec(20_000, "c"), self.rec(25_000, "a")]              # 5 s after: wins even at +4 s
+        self.assertEqual(ts.expected_wall_losses(recs, 0, 30_000, 4000), 1)
+        self.assertEqual(ts.expected_wall_losses(recs, 0, 30_000, 2000), 0)
+
+    def test_a_slow_clock_costs_its_own_reports_that_follow_another_closely(self):
+        recs = [self.rec(0, "a"), self.rec(3000, "c"), self.rec(10_000, "a"), self.rec(16_000, "c")]
+        self.assertEqual(ts.expected_wall_losses(recs, 0, 20_000, -4000), 1)
+        self.assertEqual(ts.expected_wall_losses(recs, 0, 20_000, 4000), 0)
+
+    def test_late_reports(self):
+        recs = [self.rec(0, "a"), self.rec(1000, "b", delay=2000), self.rec(2000, "c")]
+        self.assertEqual(ts.late_reports(recs, 0, 3000), 1)  # b's, observed at -1000, after a's at 0
 
 
 class CommitLabelTest(unittest.TestCase):

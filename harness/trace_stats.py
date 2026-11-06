@@ -1,0 +1,106 @@
+"""Facts about a recorded trace, computed from the trace alone with no run
+involved: the ones docs/predictions-2.md and the README rest on, and what a
+skewed wall clock must lose, so the harness's measurements can be checked
+against a model of the mechanism.
+
+    python -I harness/trace_stats.py traces/adsb-2026-11-05.jsonl.gz
+"""
+
+from __future__ import annotations
+
+import gzip
+import json
+import statistics
+import sys
+from collections import defaultdict
+from pathlib import Path
+
+REAL_BASE_WINDOWS = [(w * 450_000, w * 450_000 + 50_000) for w in range(8)]  # as run.py replays them
+
+
+def load(path: Path) -> list[dict]:
+    with gzip.open(path, "rt", encoding="utf-8") as f:
+        return sorted((json.loads(line) for line in f if line.strip()), key=lambda r: r["t_ms"])
+
+
+def observed(r: dict) -> int:
+    return r["t_ms"] - r.get("delay_ms", 0)
+
+
+def late_reports(recs: list[dict], lo: int, hi: int) -> int:
+    """Reports received in [lo, hi) after some node had already received a
+    fresher observation of the same aircraft (earlier receipts count too)."""
+    seen: dict[str, int] = {}
+    late = 0
+    for r in recs:
+        if r["t_ms"] >= hi:
+            break
+        best = seen.get(r["icao"])
+        if lo <= r["t_ms"] and best is not None and best > observed(r):
+            late += 1
+        seen[r["icao"]] = observed(r) if best is None else max(best, observed(r))
+    return late
+
+
+def expected_wall_losses(recs: list[dict], lo: int, hi: int, skew_ms: int, skewed: str = "c") -> int:
+    """Writes a wall-clock node must lose in [lo, hi) when node `skewed` runs
+    skew_ms off true time. A write loses when the value it meets carries a
+    later stamp yet an older observation. With the skewed node fast, that is a
+    report by another node less than skew_ms after the skewed node's report of
+    the same aircraft, and fresher than it; with it slow, a report by the
+    skewed node less than |skew_ms| after another node's, and fresher. Every
+    node replays at true time, and every report reaches the others before the
+    next one (the trace's closest handoff is 2.37 s, sync takes well under 1 s)."""
+    by_ac: dict[str, list[dict]] = defaultdict(list)
+    for r in recs:
+        if lo <= r["t_ms"] < hi:
+            by_ac[r["icao"]].append(r)
+    lost = 0
+    for rs in by_ac.values():
+        last = {True: None, False: None}  # the latest report by the skewed node, and by any other
+        for r in rs:
+            mine = r["node"] == skewed
+            other = last[not mine]
+            if other is not None:
+                gap = r["t_ms"] - other["t_ms"]
+                ahead = skew_ms if not mine else -skew_ms  # how far the stamp it meets runs ahead of its own
+                if gap < ahead and observed(r) > observed(other):
+                    lost += 1
+                    continue  # it lost, so the value it met is still the one held
+            last[mine] = r
+    return lost
+
+
+def facts(recs: list[dict]) -> None:
+    span = recs[-1]["t_ms"]
+    minutes = defaultdict(set)
+    nodes_of = defaultdict(set)
+    for r in recs:
+        minutes[r["t_ms"] // 60_000].add(r["icao"])
+        nodes_of[r["icao"]].add(r["node"])
+    full = [len(minutes[m]) for m in range(span // 60_000)]
+    multi = sum(len(ns) >= 2 for ns in nodes_of.values())
+    print(f"{len(recs)} reports, {len(nodes_of)} aircraft, {multi} ({multi / len(nodes_of):.0%}) seen by two or more sensors")
+    print(f"aircraft per full minute: median {statistics.median(full)}, {min(full)} to {max(full)}")
+    d = sorted(r.get("delay_ms", 0) for r in recs)
+    print(f"feed delay: median {statistics.median(d) / 1000:.2f} s, p99 {d[int(0.99 * len(d))] / 1000:.2f} s")
+    for n in sorted({r["node"] for r in recs}):
+        ts = sorted({r["t_ms"] for r in recs if r["node"] == n})
+        gaps = sorted(b - a for a, b in zip(ts, ts[1:]))
+        print(f"sensor {n}: {len(ts)} polls, gap median {statistics.median(gaps) / 1000:.1f} s, max {gaps[-1] / 1000:.1f} s")
+    print(f"late reports: {late_reports(recs, 0, span + 1)} of {len(recs) - len(nodes_of)} after each aircraft's first")
+
+
+def main() -> int:
+    recs = load(Path(sys.argv[1]))
+    facts(recs)
+    print("\nreal-base windows: late reports, and the wall clock's expected lost writes by c's skew")
+    for lo, hi in REAL_BASE_WINDOWS:
+        losses = {k: expected_wall_losses(recs, lo, hi, k) for k in (-4000, -2000, 2000, 4000)}
+        print(f"  from {lo // 1000:4d} s: late {late_reports(recs, lo, hi)}, lost " +
+              ", ".join(f"{k:+d} ms: {v}" for k, v in losses.items()))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

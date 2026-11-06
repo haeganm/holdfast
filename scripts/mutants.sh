@@ -60,6 +60,7 @@ mutants=(
   "harness: a deployed peer's table always counts as matching|harness/run.py|s/matches = final == \{run\.extra\[\"cloud_hash\"\]\[\"hash\"\]\}/matches = True/"
   "cloud: a failed write still answers success|cloud/peer.go|s/\tif err != nil \{\n\t\t\/\/ Nothing is lost/\tif false {\n\t\t\/\/ Nothing is lost/"
   "harness: a cloud peer left in the shell leaks into every run|harness/run.py|s/\"CLOUD_PEER\": \"\", \"CLOUD_TOKEN\": \"\",/\"CLOUD_UNUSED\": \"\",/"
+  "harness: the trace model counts a write lost even when it was older|harness/trace_stats.py|s/ and observed\(r\) > observed\(other\)://"
   "adsb: backoff can undercut the interval|internal/adsb/adsb.go|s/return max\(min\(2\*last, maxBackoff\), every, retryAfter\)/return min(max(2*last, retryAfter), maxBackoff)/"
   "harness: full recovery ignores its floor|harness/run.py|s/if v > worst_floor:\n            start = None/if False:\n            start = None/"
   "harness: full recovery accepts a single dip|harness/run.py|s/if t - start >= SUSTAIN_MS:/if t - start >= 0:/"
@@ -96,7 +97,7 @@ copy() {
   rm -rf "$work/src"
   mkdir -p "$work/src"
   (cd "$root" && tar -cf - --exclude=cloud/terraform --exclude=cloud/build \
-    go.mod cmd internal cloud harness/run.py harness/test_run.py) | (cd "$work/src" && tar -xf -)
+    go.mod cmd internal cloud harness/run.py harness/trace_stats.py harness/test_run.py) | (cd "$work/src" && tar -xf -)
 }
 
 # Every suite has to pass unmutated first. Otherwise a broken environment

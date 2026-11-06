@@ -56,7 +56,7 @@ There is one definition of which of two values wins: `crdt.Compare`, a total ord
 | `Ord(a) < Ord(b)` exactly when `Compare(a, b) < 0` | `TestOrdOrdersLikeCompare`, and `TestTheStoreKeepsWhatMergeKeeps` against DynamoDB Local itself |
 | The cloud table's value for an aircraft only moves up, whatever order invocations land in | `TestConcurrentWritesLeaveTheLargestTrack` |
 
-Each of these has planted bugs that the tests must catch: `scripts/mutants.sh` runs 67 of them on every gate, after first checking that the unmutated tests pass, so a broken environment can't pass for a caught bug.
+Each of these has planted bugs that the tests must catch: `scripts/mutants.sh` runs 68 of them on every gate, after first checking that the unmutated tests pass, so a broken environment can't pass for a caught bug.
 
 `TestSimulation` deserves a word. It runs three or four nodes in one goroutine on a fake clock and draws every fault from a seed: lost, delayed, duplicated and cut-off messages, lost responses, partitions, clock jumps in both directions, restarts that wipe a node, two reports in the same millisecond, and aircraft that arrive and go quiet. It checks the invariants after every step and fails if the schedules stop exercising any of those paths. A failure replays exactly from its seed. It found two real bugs before any measurement saw them: a restarted node reusing its old stamps, and expired tracks coming back after a clock stepped back. An independent review then found what a single goroutine can't: an expire landing between a receive reading its cutoff and taking the lock, and a corrupt table item blocking every valid write for its aircraft. Both are fixed, each with a test that fails on the old code.
 
