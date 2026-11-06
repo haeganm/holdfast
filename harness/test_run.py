@@ -62,6 +62,20 @@ class AnalyzeTest(unittest.TestCase):
         receipt = {("AAAAAA", T0 + 5000): T0 + 5200}
         self.assertEqual(h.propagation(self.exp, receipt), ([100, 400], 2, 0))
 
+    def test_a_node_already_holding_something_fresher_is_reached_at_the_receipt(self):
+        # a's report of a position observed at 5000 reaches a at 7000, 2 s late.
+        # b had reported a fresher one (6000) itself and c held b's by 6500, so
+        # both count as reached when a's report arrives: at 0, never before it.
+        run = h.Run(h.Config("test", "mesh", "loss0", "hlc", 0), 0, duration_ms=10_000, settle_ms_window=0)
+        b_own = {"AAAAAA": {"ts": {}, "origin": "b", "at": T0 + 6000, "own": T0 + 6000}}
+        fresher = {"AAAAAA": {"ts": {}, "origin": "b", "at": T0 + 6000}}
+        a_late = {"AAAAAA": {"ts": {}, "origin": "a", "at": T0 + 5000, "own": T0 + 5000}}
+        run.polls = [poll(6000, a=state(6000, {}), b=state(6000, b_own), c=state(6000, {})),
+                     poll(6500, a=state(6500, fresher), b=state(6500, b_own), c=state(6500, fresher)),
+                     poll(7000, a=state(7000, a_late), b=state(7000, b_own), c=state(7000, fresher))]
+        receipt = {("AAAAAA", T0 + 5000): T0 + 7000, ("AAAAAA", T0 + 6000): T0 + 6000}
+        self.assertEqual(h.propagation(run, receipt), ([0, 0, 500, 500], 4, 0))
+
     def test_a_report_that_never_arrives_is_counted_not_dropped(self):
         for p in self.exp.polls[3:]:
             p.states["c"] = dict(p.states["c"], tracks={})  # c never gets a's report

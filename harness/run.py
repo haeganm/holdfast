@@ -30,7 +30,9 @@ Definitions used throughout:
                        so lag moves in whole seconds.
     prop               propagation latency: for each report made after the warm-up and
                        each edge node that did not make it, time until the node holds it
-                       or something fresher. Percentiles are over delivered pairs only.
+                       or something fresher, 0 if it already did when the report arrived
+                       (clamped after review; such pairs had read as negative).
+                       Percentiles are over delivered pairs only.
                        On the synthetic trace a report counts from its observation, which
                        is also when its node received it. On a recorded trace it counts
                        from its first receipt by any node, from the trace; live, from the
@@ -544,7 +546,8 @@ def receipts_polled(polls: list[Poll]) -> tuple[dict[tuple[str, int], int], list
 def propagation(run: Run, receipt: dict[tuple[str, int], int] | None = None) -> tuple[list[float], int, int]:
     """Propagation latency, sorted: for every report made during the ingest
     window and every edge node that did not make that report itself, the time
-    from the report until the node first holds it or something fresher.
+    from the report until the node first holds it or something fresher, and
+    0 for a node that already held something fresher when it arrived.
     A report counts from its observation, or from its first receipt when
     receipt maps one. Resolution is the poll interval. Also returns how many
     such pairs there were and how many were never delivered."""
@@ -572,7 +575,7 @@ def propagation(run: Run, receipt: dict[tuple[str, int], int] | None = None) -> 
             for ac, tr in p.states[n]["tracks"].items():
                 q = pending.get((n, ac))
                 while q and q[0][0] <= tr["at"]:
-                    out.append(now - q.pop(0)[1])
+                    out.append(max(0, now - q.pop(0)[1]))
     out.sort()
     return out, pairs, sum(len(q) for q in pending.values())
 
