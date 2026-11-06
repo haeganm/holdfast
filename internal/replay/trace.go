@@ -251,7 +251,7 @@ func ParseCircle(s string) (Circle, error) {
 // Contains reports whether a position is within the circle, by great-circle
 // distance on a spherical Earth.
 func (c Circle) Contains(lat, lon float64) bool {
-	return DistanceKm(c.Lat, c.Lon, lat, lon) <= c.RadiusKm
+	return distanceKm(c.Lat, c.Lon, lat, lon) <= c.RadiusKm
 }
 
 // Enclosing returns a circle around the given circles' centers' mean that
@@ -263,13 +263,13 @@ func Enclosing(cs []Circle) Circle {
 		out.Lon += c.Lon / float64(len(cs))
 	}
 	for _, c := range cs {
-		out.RadiusKm = max(out.RadiusKm, DistanceKm(out.Lat, out.Lon, c.Lat, c.Lon)+c.RadiusKm)
+		out.RadiusKm = max(out.RadiusKm, distanceKm(out.Lat, out.Lon, c.Lat, c.Lon)+c.RadiusKm)
 	}
 	return out
 }
 
-// DistanceKm is the great-circle distance on a spherical Earth.
-func DistanceKm(lat1, lon1, lat2, lon2 float64) float64 {
+// distanceKm is the great-circle distance on a spherical Earth.
+func distanceKm(lat1, lon1, lat2, lon2 float64) float64 {
 	const earthKm = 6371.0088 // mean radius
 	rad := math.Pi / 180
 	dLat, dLon := (lat2-lat1)*rad, (lon2-lon1)*rad

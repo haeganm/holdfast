@@ -159,7 +159,7 @@ func TestCircle(t *testing.T) {
 		t.Fatal(err)
 	}
 	// One degree of latitude is about 111.2 km.
-	if d := DistanceKm(39, -77, 40, -77); math.Abs(d-111.2) > 0.2 {
+	if d := distanceKm(39, -77, 40, -77); math.Abs(d-111.2) > 0.2 {
 		t.Fatalf("one degree of latitude = %.2f km, want about 111.2", d)
 	}
 	if !c.Contains(39.8, -77) || c.Contains(40, -77) {
