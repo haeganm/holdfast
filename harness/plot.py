@@ -3,16 +3,16 @@
     python harness/plot.py --sync results/<sync run dir> --clock results/<clock run dir> --out docs
 
 Writes partition-timeline.png, sync-latency.png and clock-skew.png, and
-prints the README's results tables (median, then min-max over repeats). Every
-point drawn and every number printed is a row of summary.csv or polls/*.csv in
-the given directories; nothing is smoothed or filtered.
+prints the README's results tables, which tables.py builds. Every point drawn
+and every number printed is a row of summary.csv or polls/*.csv in the given
+directories; nothing is smoothed or filtered.
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
 import statistics
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -20,7 +20,11 @@ import matplotlib
 import matplotlib.ticker
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
+import matplotlib.pyplot as plt
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # python -I leaves the script's folder off the path
+import tables
+from tables import LABELS, SCENARIOS, SKEWS, pick, rows
 
 # Reference categorical palette, light mode, fixed order (dataviz skill).
 BLUE, ORANGE, AQUA = "#2a78d6", "#eb6834", "#1baf7a"
@@ -43,11 +47,6 @@ def plain_log(ax) -> None:
     # label the 2s and 5s by their first significant digit, so 0.5 and 0.2 get one too
     ax.yaxis.set_minor_formatter(matplotlib.ticker.FuncFormatter(
         lambda v, _: f"{v:g}" if f"{v:g}".lstrip("0.")[:1] in ("2", "5") else ""))
-
-
-def rows(path: Path) -> list[dict]:
-    with path.open(newline="") as f:
-        return list(csv.DictReader(f))
 
 
 def spread(vals: Sequence[float]) -> tuple[float, float, float]:
@@ -79,11 +78,6 @@ def timeline(sync_dir: Path, out: Path) -> None:
     plt.close(fig)
 
 
-SCENARIOS = ["loss0", "loss20", "burst20", "loss50", "partition", "hubdown"]
-LABELS = {"loss0": "no loss", "loss20": "20% loss", "burst20": "20% bursty", "loss50": "50% loss",
-          "partition": "c cut 20 s", "hubdown": "hub cut 20 s"}
-
-
 def sync_latency(sync_dir: Path, out: Path) -> None:
     data = rows(sync_dir / "summary.csv")
     fig, ax = plt.subplots(figsize=(8, 4.2))
@@ -109,9 +103,6 @@ def sync_latency(sync_dir: Path, out: Path) -> None:
     fig.tight_layout()
     fig.savefig(out / "sync-latency.png", dpi=150)
     plt.close(fig)
-
-
-SKEWS = [-2000, -500, 0, 2000]
 
 
 def clock_skew(clock_dir: Path, out: Path) -> None:
@@ -140,184 +131,6 @@ def clock_skew(clock_dir: Path, out: Path) -> None:
     fig.tight_layout()
     fig.savefig(out / "clock-skew.png", dpi=150)
     plt.close(fig)
-
-
-def cell(vals: list[str | None], n: int) -> str:
-    """Median and min-max of a summary column over repeats; blank cells are
-    runs where the metric never happened, and are counted, not dropped."""
-    if all(v is None for v in vals):
-        return "n/a"  # a column this sweep predates
-    if vals and not all(v == "" or v.replace(".", "", 1).lstrip("-").isdigit() for v in vals):
-        return " ".join(sorted(set(vals)))  # text, such as the commit
-    got = [float(v) for v in vals if v != ""]
-    if not got:
-        return "never"
-    m, a, b = spread(got)
-    def fmt(x: float) -> str:
-        return f"{x:g}"  # a median of an even count can end in .5; show it, don't truncate
-    out = fmt(m) if a == b else f"{fmt(m)} ({fmt(a)}-{fmt(b)})"
-    return out if len(got) == n else f"{out}, {n - len(got)}/{n} never"
-
-
-# Columns that only mean something when a run has a cut; blank otherwise, not "never".
-CUT_COLS = {"merged_cut", "catchup_ms", "catchup_merge_ms", "diverge_cut", "recover_p95_ms", "recover_all_ms"}
-
-
-def table(header: list[str], keys: list[tuple[str, ...]], cols: list[str],
-          data: list[dict], key_cols: list[str]) -> None:
-    print("| " + " | ".join(header) + " |")
-    print("|" + "---|" * len(header))
-    for k in keys:
-        rs = [r for r in data if tuple(r[c] for c in key_cols) == k]
-        if not rs:
-            continue
-        settled = sum(r["settled"] == "True" for r in rs)
-        cut = rs[0]["scenario"] in ("partition", "hubdown")
-        print("| " + " | ".join([*k, f"{settled}/{len(rs)}", *("" if c in CUT_COLS and not cut else cell([r.get(c) for r in rs], len(rs))
-                                                            for c in cols)]) + " |")
-
-
-def tables(sync_dir: Path, clock_dir: Path) -> None:
-    sync = rows(sync_dir / "summary.csv")
-    cols = ["settle_ms", "prop_p50", "prop_p95", "prop_p99", "prop_unresolved", "recover_p95_ms", "recover_all_ms",
-            "merged_cut", "sync_err_rate", "wire_bytes_per_obs", "ingest_lost", "rejected", "aborted"]
-    keys = [(t, s) for t in ("mesh", "star") for s in SCENARIOS]
-    print(f"{sync_dir / 'summary.csv'}\n")
-    table(["topology", "scenario", "settled", *cols], keys, cols, sync, ["topology", "scenario"])
-    clock = rows(clock_dir / "summary.csv")
-    cols = ["ingest_lost", "merge_regress", "wrong_final", "prop_p95", "rejected", "aborted"]
-    keys = [(c, str(k)) for c in ("hlc", "wall") for k in SKEWS]
-    print(f"\n{clock_dir / 'summary.csv'}\n")
-    table(["clock", "skew_ms", "settled", *cols], keys, cols, clock, ["clock", "skew_ms"])
-
-
-# The real-traffic, live and cloud tables, printed exactly as the README shows them.
-
-def num(v: str | None) -> float | None:
-    return None if v in ("", None) else float(v)
-
-
-def fmt(x: float, kind: str) -> str:
-    if kind == "pct":
-        return f"{x * 100:.1f}%".replace(".0%", "%")
-    return f"{round(x)}" if kind == "int" else f"{x:g}"
-
-
-def rcell(rs: list[dict], col: str, kind: str = "ms", agg: str = "median") -> str:
-    """Median (or total) over runs, then min-max; runs where the metric never
-    happened are counted after it, not dropped."""
-    got = sorted(v for v in (num(r[col]) for r in rs) if v is not None)
-    never = len(rs) - len(got)
-    if not got:
-        return "never" if never else ""
-    if agg == "sum":
-        return f"{fmt(sum(got), kind)} ({fmt(got[0], kind)}-{fmt(got[-1], kind)})"
-    m = statistics.median(got)
-    out = fmt(m, kind) if got[0] == got[-1] else f"{fmt(m, kind)} ({fmt(got[0], kind)}-{fmt(got[-1], kind)})"
-    return out + (f", {never} never" if never else "")
-
-
-def pick(rs: list[dict], **kw) -> list[dict]:
-    return [r for r in rs if all(r[k] == str(v) for k, v in kw.items())]
-
-
-def settled(rs: list[dict]) -> str:
-    return f"{sum(r['settled'] == 'True' for r in rs)}/{len(rs)}"
-
-
-def md(header: list[str], lines: list[list[str]]) -> None:
-    print("| " + " | ".join(header) + " |")
-    print("|" + "---|" * len(header))
-    for line in lines:
-        print("| " + " | ".join(line) + " |")
-    print()
-
-
-def real_tables(hour_dir: Path | None, base_dir: Path | None, cloud_dir: Path | None, control_dir: Path | None,
-                live_dir: Path | None, sync_dir: Path) -> None:
-    if hour_dir and base_dir:
-        hour, base = rows(hour_dir / "summary.csv"), rows(base_dir / "summary.csv")
-        print(f"\n{hour_dir / 'summary.csv'}, the no-loss row from {base_dir / 'summary.csv'}\n")
-        conds = [("no loss (8 windows, below)", pick(base, topology="mesh", scenario="loss0", clock="hlc", skew_ms=0))]
-        conds += [(label, pick(hour, scenario=sc)) for label, sc in
-                  (("20% loss", "loss20"), ("50% loss", "loss50"), ("c cut 23.6 s", "partition"))]
-        lines = []
-        for label, rs in conds:
-            live = [r for r in rs if num(r["prop_n"])]  # windows with any report to propagate
-            cut = label.startswith("c cut")
-            lines.append([label, settled(rs), rcell(rs, "settle_ms"), rcell(live, "prop_p50"), rcell(live, "prop_p95"),
-                          rcell(live, "prop_p99"), rcell(live, "prop_unresolved", "pct"), rcell(live, "stale_p50"),
-                          rcell(live, "stale_p99"), rcell(live, "diverge_mean", "pct"),
-                          rcell(rs, "catchup_merge_ms") if cut else "", rcell(rs, "merged_cut") if cut else "",
-                          rcell(rs, "sync_err_rate", "pct"), rcell(live, "wire_bytes_per_useful", "int")])
-            print(f"{label}: {len(rs) - len(live)} windows with nothing to propagate")
-        print()
-        md(["network", "settled", "settle", "prop p50", "prop p95", "prop p99", "never delivered", "staleness p50",
-            "staleness p99", "divergence", "catch-up", "merged during the cut", "sync errors", "bytes per useful update"],
-           lines)
-        fd = [r for r in pick(hour, scenario="loss20") if num(r["feed_delay_p50"]) is not None]
-        print(f"feed delay over the {len(fd)} windows with reports: p50 {rcell(fd, 'feed_delay_p50')}, "
-              f"p99 {rcell(fd, 'feed_delay_p99')}")
-        reg = [num(r["catchup_ms"]) for r in pick(hour, scenario="partition")]
-        print(f"registered catchup_ms: {sum(v is None for v in reg)} of {len(reg)} never completed; median counting "
-              f"those as never: {statistics.median(float('inf') if v is None else v for v in reg)}")
-    if base_dir:
-        base = rows(base_dir / "summary.csv")
-        print(f"\n{base_dir / 'summary.csv'}: the central server\n")
-        lines = []
-        for label, topo, sc in (("mesh, no loss", "mesh", "loss0"), ("star, no loss", "star", "loss0"),
-                                ("star, 50% loss", "star", "loss50"), ("star, hub cut 20 s", "star", "hubdown")):
-            rs = pick(base, topology=topo, scenario=sc, clock="hlc", skew_ms=0)
-            lines.append([label, settled(rs), rcell(rs, "prop_p50"), rcell(rs, "prop_p95"),
-                          rcell(rs, "prop_unresolved", "pct"), rcell(rs, "stale_p50"), rcell(rs, "stale_p99"),
-                          rcell(rs, "diverge_mean", "pct"), rcell(rs, "merged_cut") if sc == "hubdown" else "",
-                          rcell(rs, "sync_err_rate", "pct"), rcell(rs, "wire_bytes_per_useful", "int")])
-        md(["configuration", "settled", "prop p50", "prop p95", "never delivered", "staleness p50", "staleness p99",
-            "divergence", "merged during the cut", "sync errors", "bytes per useful update"], lines)
-        print(f"{base_dir / 'summary.csv'}: the clocks, totals over the eight windows, range per window\n")
-        names = {-4000: "4 s slow", -2000: "2 s slow", 2000: "2 s fast", 4000: "4 s fast"}
-        nets = {"loss0": "no loss", "loss20": "20% loss", "partition": "c cut 20 s"}
-        lines = []
-        for label, clock, skews, sc in (("hybrid", "hlc", (-4000, -2000, 2000, 4000), "loss0"),
-                                        ("wall", "wall", (-4000, -2000, 2000), "loss0"), ("wall", "wall", (4000,), "loss0"),
-                                        ("hybrid", "hlc", (4000,), "loss20"), ("wall", "wall", (4000,), "loss20"),
-                                        ("hybrid", "hlc", (4000,), "partition"), ("wall", "wall", (4000,), "partition")):
-            per = [pick(base, clock=clock, skew_ms=k, scenario=sc) for k in skews]
-            cells = []
-            for col in ("ingest_lost", "merge_regress", "wrong_final"):
-                # one row stands for several skews only if they agree window by window
-                assert len({tuple(r[col] for r in sorted(rs, key=lambda r: r["run_id"][-3:])) for rs in per}) == 1, \
-                    (label, sc, col)
-                cells.append(rcell(per[0], col, "n", "sum"))
-            lines.append([label, ", ".join(names[k] for k in skews), nets[sc], *cells])
-        md(["clock", "c's clock", "network", "lost local writes", "merges an older report won",
-            "aircraft wrong at the end"], lines)
-    if cloud_dir and control_dir:
-        cloud, control = rows(cloud_dir / "summary.csv"), rows(control_dir / "summary.csv")
-        reg = [r for r in rows(sync_dir / "summary.csv") if r["topology"] == "star"]
-        print(f"\n{cloud_dir / 'summary.csv'} against the hub: {control_dir / 'summary.csv'} at the same commit, "
-              f"and the star rows of {sync_dir / 'summary.csv'}\n")
-        lines = []
-        for sc, label in (("loss0", "no loss"), ("loss20", "20% loss"), ("partition", "c cut 20 s")):
-            for who, rs in (("in-memory hub, same commit", pick(control, scenario=sc)),
-                            ("cloud peer on DynamoDB Local", pick(cloud, scenario=sc)),
-                            (f"in-memory hub, registered ({reg[0]['commit']})", pick(reg, scenario=sc))):
-                lines.append([label, who, settled(rs), rcell(rs, "prop_p50"), rcell(rs, "prop_p95"), rcell(rs, "prop_p99"),
-                              rcell(rs, "cloud_writes_per_report", "n") if "cloud" in who else ""])
-        md(["network", "relay", "settled", "prop p50", "prop p95", "prop p99", "conditional writes per report"], lines)
-    if live_dir:
-        live = rows(live_dir / "summary.csv")
-        print(f"\n{live_dir / 'summary.csv'}\n")
-        lines = []
-        for topo, sc, label in (("mesh", "loss0", "mesh, no loss"), ("mesh", "partition", "mesh, c cut 20 s"),
-                                ("star", "hubdown", "star, hub cut 20 s")):
-            rs = pick(live, topology=topo, scenario=sc)
-            cut = sc != "loss0"
-            lines.append([label, settled(rs), rcell(rs, "aircraft", "n"), rcell(rs, "prop_p50"), rcell(rs, "prop_p95"),
-                          rcell(rs, "feed_delay_p50"), rcell(rs, "stale_p50"), rcell(rs, "stale_p99"),
-                          rcell(rs, "catchup_merge_ms") if cut else "", rcell(rs, "merged_cut") if cut else ""])
-        md(["configuration", "settled", "aircraft", "prop p50", "prop p95", "feed delay p50", "staleness p50",
-            "staleness p99", "catch-up", "merged during the cut"], lines)
 
 
 def strip(ax, x: float, vals: Sequence[float], color: str, label: str | None) -> None:
@@ -451,8 +264,8 @@ def main() -> None:
         cloud_relay(args.cloud, args.star_control, args.out)
         wrote.append("cloud-relay.png")
     print(f"wrote {', '.join(wrote)} in {args.out}\n")
-    tables(args.sync, args.clock)
-    real_tables(args.real_hour, args.real_base, args.cloud, args.star_control, args.live, args.sync)
+    print("\n".join(tables.report(args.sync, args.clock, args.real_hour, args.real_base, args.cloud, args.star_control,
+                                  args.live)))
 
 
 if __name__ == "__main__":
