@@ -216,9 +216,23 @@ func run(ctx context.Context, args []string) error {
 		return err
 	case <-ctx.Done():
 	}
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	return shutdown(srv, 5*time.Second, log)
+}
+
+// shutdown stops srv, giving open requests up to budget to finish. A peer's
+// upload still arriving over a slow link can outlast it (the read timeout is
+// longer), so then the rest are cut off: a peer's next round resends
+// whatever didn't land, so a stop never loses anything.
+func shutdown(srv *http.Server, budget time.Duration, log *slog.Logger) error {
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
-	return srv.Shutdown(shutdownCtx)
+	err := srv.Shutdown(ctx)
+	if errors.Is(err, context.DeadlineExceeded) {
+		log.Warn("shutdown forced: requests were still open", "after", budget)
+		srv.Close()
+		return nil
+	}
+	return err
 }
 
 // ingestLive polls the feed for this node's coverage from start until length

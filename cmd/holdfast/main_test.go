@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"io"
+	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -154,6 +156,40 @@ func TestTheHarnessFlagsStillStart(t *testing.T) {
 		if err := run(stopped, append([]string{"-id", "a", "-listen", "127.0.0.1:0"}, args...)); err != nil {
 			t.Errorf("%q: %v", args, err)
 		}
+	}
+}
+
+// A peer's upload still arriving over a slow link can outlast the shutdown
+// budget, since the read timeout is longer. That is a routine stop, not a
+// failure: the upload is cut off, and the peer's next round resends it.
+func TestShutdownCutsOffAnUploadThatOutlastsItsBudget(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reading := make(chan struct{})
+	srv := &http.Server{Handler: http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		close(reading)
+		io.Copy(io.Discard, r.Body)
+	})}
+	go srv.Serve(ln)
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	io.WriteString(conn, "POST /push HTTP/1.1\r\nHost: a\r\nContent-Length: 1000\r\n\r\n{\"from\":\"b\",") // the rest never comes
+	select {
+	case <-reading:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the upload never reached its handler")
+	}
+	var logs strings.Builder
+	if err := shutdown(srv, 100*time.Millisecond, slog.New(slog.NewTextHandler(&logs, nil))); err != nil {
+		t.Fatalf("shutdown with an upload still arriving: %v", err)
+	}
+	if !strings.Contains(logs.String(), "forced") {
+		t.Fatalf("the forced close was not logged: %q", logs.String())
 	}
 }
 

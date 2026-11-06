@@ -120,6 +120,7 @@ mutants=(
   "edge: the cloud token goes through a proxy in the clear|cmd/holdfast/main.go|s/\t\t\tdirect\.Proxy = nil\n//"
   "edge: a trace offset past the last record replays nothing|cmd/holdfast/main.go|s/if len\(all\) == 0 \|\| \*from > all\[len\(all\)-1\]\.TMS \{/if false {/"
   "edge: a start long past makes every report due at once|cmd/holdfast/main.go|s/\*t0 != 0 && late > 5\*time\.Second/false/"
+  "edge: an upload that outlasts the shutdown budget fails the stop|cmd/holdfast/main.go|s/\t\tsrv\.Close\(\)\n\t\treturn nil\n/\t\treturn err\n/"
   "replay: coverage lets a NaN through|internal/replay/trace.go|s/ok := c\.Lat >= -90 && c\.Lat <= 90 && c\.Lon >= -180 && c\.Lon <= 180 && c\.RadiusKm > 0/ok := !(c.Lat < -90 || c.Lat > 90 || c.Lon < -180 || c.Lon > 180) \&\& c.RadiusKm > 0/"
   "replay: coverage takes an infinite radius|internal/replay/trace.go|s/ && !math\.IsInf\(c\.RadiusKm, 1\)//"
   "replay: Read keeps a line's first record and drops the rest|internal/replay/trace.go|s/if strings\.TrimSpace\(text\[dec\.InputOffset\(\):\]\) != \"\" \{/if false {/"
