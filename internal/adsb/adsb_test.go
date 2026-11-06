@@ -32,7 +32,7 @@ const apiResponse = `{"now":1700000000000,"total":11,"ctime":1700000000000,"ptim
 ]}`
 
 func TestParseKeepsValidAircraftAndSkipsTheRest(t *testing.T) {
-	reports, skipped, made, err := Parse(strings.NewReader(apiResponse))
+	reports, made, err := Parse(strings.NewReader(apiResponse))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,9 +41,6 @@ func TestParseKeepsValidAircraftAndSkipsTheRest(t *testing.T) {
 	}
 	// Skipped: non-ICAO, no position, position too old, latitude out of
 	// range, latitude of the wrong type, no position age.
-	if skipped != 6 {
-		t.Errorf("skipped %d, want 6", skipped)
-	}
 	want := []Report{
 		// Listed twice: the fresher position (0.4 s old, not 3 s) wins.
 		{"A1B2C3", crdt.Observation{Lat: 39.1, Lon: -77.2, AltFt: 31000, GSKt: 420.5, HeadingDeg: 87.2, ObservedAtMS: 1_699_999_999_600}},
@@ -65,7 +62,7 @@ func TestParseKeepsValidAircraftAndSkipsTheRest(t *testing.T) {
 func TestParseReadsAReceiversAircraftJSON(t *testing.T) {
 	// readsb's aircraft.json: "aircraft" rather than "ac", and "now" in seconds.
 	body := `{"now":1700000000.5,"messages":123,"aircraft":[{"hex":"abcdef","lat":39,"lon":-77,"seen_pos":0.5}]}`
-	reports, _, made, err := Parse(strings.NewReader(body))
+	reports, made, err := Parse(strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +74,7 @@ func TestParseReadsAReceiversAircraftJSON(t *testing.T) {
 func TestParseRefusesAResponseWithoutAClock(t *testing.T) {
 	for _, body := range []string{`{"ac":[]}`, `{"now":0,"ac":[]}`, `{"now":"soon"}`, `not json`, ``,
 		`{"now":1e19,"ac":[]}`, `{"now":-5,"ac":[]}`, `{"now":5000000000000,"ac":[]}`} {
-		if _, _, _, err := Parse(strings.NewReader(body)); err == nil {
+		if _, _, err := Parse(strings.NewReader(body)); err == nil {
 			t.Errorf("accepted %q", body)
 		}
 	}
@@ -87,7 +84,7 @@ func FuzzParse(f *testing.F) {
 	f.Add(apiResponse)
 	f.Add(`{"now":1700000000.5,"aircraft":[{"hex":"abcdef","lat":39,"lon":-77,"seen_pos":0.5}]}`)
 	f.Fuzz(func(t *testing.T, body string) {
-		reports, _, made, err := Parse(strings.NewReader(body))
+		reports, made, err := Parse(strings.NewReader(body))
 		if err != nil {
 			return
 		}
@@ -243,8 +240,8 @@ func TestSensorForgetsAircraftLongGoneQuiet(t *testing.T) {
 func TestParseKeepsTheSameDuplicateWhateverTheOrder(t *testing.T) {
 	one := `{"hex":"abcdef","lat":39,"lon":-77,"alt_baro":1000,"seen_pos":1}`
 	two := `{"hex":"abcdef","lat":39,"lon":-77,"alt_baro":2000,"seen_pos":1}`
-	a, _, _, _ := Parse(strings.NewReader(`{"now":1700000000000,"ac":[` + one + "," + two + "]}"))
-	b, _, _, _ := Parse(strings.NewReader(`{"now":1700000000000,"ac":[` + two + "," + one + "]}"))
+	a, _, _ := Parse(strings.NewReader(`{"now":1700000000000,"ac":[` + one + "," + two + "]}"))
+	b, _, _ := Parse(strings.NewReader(`{"now":1700000000000,"ac":[` + two + "," + one + "]}"))
 	if len(a) != 1 || len(b) != 1 || a[0] != b[0] {
 		t.Fatalf("order changed the result: %+v vs %+v", a, b)
 	}

@@ -65,15 +65,15 @@ type aircraft struct {
 	SeenPos *float64        `json:"seen_pos"` // seconds since the position was received
 }
 
-// Parse reads one response. It returns the valid aircraft sorted by address,
-// how many it skipped, and the time the response says it was made.
-func Parse(r io.Reader) (reports []Report, skipped int, made time.Time, err error) {
+// Parse reads one response. It returns the valid aircraft sorted by address
+// and the time the response says it was made.
+func Parse(r io.Reader) (reports []Report, made time.Time, err error) {
 	var resp response
 	if err := json.NewDecoder(r).Decode(&resp); err != nil {
-		return nil, 0, time.Time{}, fmt.Errorf("decode: %w", err)
+		return nil, time.Time{}, fmt.Errorf("decode: %w", err)
 	}
 	if resp.Now == nil || !finite(*resp.Now) || *resp.Now <= 0 {
-		return nil, 0, time.Time{}, errors.New(`response has no usable "now"`)
+		return nil, time.Time{}, errors.New(`response has no usable "now"`)
 	}
 	// The API gives milliseconds, a receiver's aircraft.json seconds.
 	nowMS := *resp.Now
@@ -81,16 +81,13 @@ func Parse(r io.Reader) (reports []Report, skipped int, made time.Time, err erro
 		nowMS *= 1000
 	}
 	if nowMS < minNowMS || nowMS > maxNowMS {
-		return nil, 0, time.Time{}, fmt.Errorf(`response clock "now" of %v is not between 2000 and 2100`, *resp.Now)
+		return nil, time.Time{}, fmt.Errorf(`response clock "now" of %v is not between 2000 and 2100`, *resp.Now)
 	}
 	made = time.UnixMilli(int64(nowMS))
 	for _, raw := range append(resp.AC, resp.Aircraft...) {
-		rep, ok := parseAircraft(raw, nowMS)
-		if !ok {
-			skipped++
-			continue
+		if rep, ok := parseAircraft(raw, nowMS); ok {
+			reports = append(reports, rep)
 		}
-		reports = append(reports, rep)
 	}
 	// A response lists an aircraft once. If one lists it twice, keep the
 	// freshest position, ties broken on the position, so the result never
@@ -107,7 +104,7 @@ func Parse(r io.Reader) (reports []Report, skipped int, made time.Time, err erro
 		)
 	})
 	reports = slices.CompactFunc(reports, func(a, b Report) bool { return a.ICAO == b.ICAO })
-	return reports, skipped, made, nil
+	return reports, made, nil
 }
 
 func parseAircraft(raw json.RawMessage, nowMS float64) (Report, bool) {
@@ -296,7 +293,7 @@ func (f Feed) Poll(ctx context.Context) ([]Report, error) {
 	if len(body) > maxBody {
 		return nil, fmt.Errorf("%s: response over %d bytes", f.URL, maxBody)
 	}
-	reports, _, made, err := Parse(bytes.NewReader(body))
+	reports, made, err := Parse(bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}

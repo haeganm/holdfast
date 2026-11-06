@@ -25,7 +25,6 @@ import (
 //
 //	TABLE                     DynamoDB table (required)
 //	PEER_TOKEN                bearer token edges must send (required in Lambda, 32+ characters)
-//	TRACK_TTL                 how long an aircraft lives without a new report (default 5m)
 //	AWS_ENDPOINT_URL_DYNAMODB the SDK's own override, for DynamoDB Local
 //
 // Outside Lambda it serves plain HTTP on -listen, so the experiment harness
@@ -82,13 +81,6 @@ func fromEnv(ctx context.Context, log *slog.Logger, inLambda bool) (*peer, error
 	if inLambda && len(p.token) < 32 {
 		return nil, errors.New("PEER_TOKEN must be at least 32 characters")
 	}
-	if s := os.Getenv("TRACK_TTL"); s != "" {
-		d, err := time.ParseDuration(s)
-		if err != nil || d <= 0 {
-			return nil, fmt.Errorf("TRACK_TTL=%q: want a positive duration", s)
-		}
-		p.ttl = d
-	}
 	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
 		return nil, err
@@ -133,7 +125,6 @@ func adapt(h http.Handler) func(context.Context, events.APIGatewayV2HTTPRequest)
 		for k, v := range e.Headers { // payload 2.0 joins repeated headers with commas
 			r.Header.Set(k, v)
 		}
-		r.RemoteAddr = e.RequestContext.HTTP.SourceIP
 		resp := &buffered{header: http.Header{}, status: http.StatusOK}
 		h.ServeHTTP(resp, r)
 		out := events.APIGatewayV2HTTPResponse{StatusCode: resp.status, Headers: map[string]string{}, Body: resp.body.String()}

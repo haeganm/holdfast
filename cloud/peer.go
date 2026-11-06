@@ -99,11 +99,7 @@ func (p *peer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if edge {
 		p.stats.ItemsRead.Add(int64(len(stored) + len(bad)))
 	}
-	n, err := node.New(node.Config{ID: "cloud", Now: p.now, StartupHold: -1, TrackTTL: p.ttl})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+	n := newNode(node.Config{ID: "cloud", Now: p.now, StartupHold: -1, TrackTTL: p.ttl})
 	// An item that doesn't decode, or that no clock would accept, still holds
 	// its key and its ord in the table. A valid write must be able to replace
 	// it, or a corrupt item that sorts high would block that aircraft for good.
