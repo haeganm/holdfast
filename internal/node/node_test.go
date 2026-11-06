@@ -919,3 +919,57 @@ func TestAnExpireDuringAReceiveCannotBringAVersionBack(t *testing.T) {
 		t.Fatalf("the node holds a version stamped %v, below its own cutoff %d", v.TS, n.cut.Load())
 	}
 }
+
+// A message is one JSON value. Anything after it, a second object or stray
+// bytes, is a refusal, on a request and on a response alike; whitespace after
+// it is fine, as a trailing newline is.
+func TestTrailingContentAfterAMessageIsRefused(t *testing.T) {
+	ts := hlc.Timestamp{WallMS: simStartMS}
+	msg, err := json.Marshal(syncResponse{HLC: ts})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name     string
+		trailing string
+		rejected int64
+	}{
+		{"a letter", "x", 1},
+		{"a closing brace", "}", 1},
+		{"a closing bracket", "]", 1},
+		{"a second object", string(msg), 1},
+		{"spaces", "  \t", 0},
+		{"a newline", "\r\n", 0},
+	} {
+		body := string(msg) + tc.trailing
+		t.Run("request, "+tc.name, func(t *testing.T) {
+			n, srv := newLoneNode(t)
+			req := `{"from":"b","hlc":{"w":` + fmt.Sprint(time.Now().UnixMilli()) + `,"l":0},"tracks":{}}` + tc.trailing
+			resp, err := http.Post(srv.URL+"/push", "application/json", strings.NewReader(req))
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			want := http.StatusNoContent
+			if tc.rejected > 0 {
+				want = http.StatusBadRequest
+			}
+			if c := n.Counters(); resp.StatusCode != want || c.Rejected != tc.rejected || c.Aborted != 0 {
+				t.Fatalf("status %d, rejected=%d aborted=%d, want %d, %d, 0", resp.StatusCode, c.Rejected, c.Aborted, want, tc.rejected)
+			}
+		})
+		t.Run("response, "+tc.name, func(t *testing.T) {
+			n, err := New(Config{ID: "a", Now: func() time.Time { return time.UnixMilli(simStartMS) }, StartupHold: -1,
+				Client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}, nil
+				})}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = n.syncOnce(context.Background(), "http://b")
+			if c := n.Counters(); (err != nil) != (tc.rejected > 0) || c.Rejected != tc.rejected {
+				t.Fatalf("err=%v rejected=%d, want rejected=%d", err, c.Rejected, tc.rejected)
+			}
+		})
+	}
+}

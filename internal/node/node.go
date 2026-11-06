@@ -606,9 +606,7 @@ func (n *Node) post(ctx context.Context, url string, in, out any) error {
 	if out == nil {
 		return nil
 	}
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(out); err != nil {
+	if err := decodeOne(bytes.NewReader(data), out); err != nil {
 		n.c.rejected.Add(1)
 		return fmt.Errorf("decode response from %s: %w", url, err)
 	}
@@ -668,9 +666,7 @@ func (n *Node) handlePush(w http.ResponseWriter, r *http.Request) {
 func (n *Node) decode(w http.ResponseWriter, r *http.Request, v interface{ from() string }) bool {
 	body := &readErr{ReadCloser: r.Body}
 	r.Body = http.MaxBytesReader(w, body, maxBody)
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
-	err := dec.Decode(v)
+	err := decodeOne(r.Body, v)
 	if err == nil && !originRe.MatchString(v.from()) {
 		err = fmt.Errorf("sender id %q: want 1-32 of [a-z0-9-]", v.from())
 	}
@@ -689,6 +685,25 @@ func (n *Node) decode(w http.ResponseWriter, r *http.Request, v interface{ from(
 	}
 	http.Error(w, fmt.Sprintf("%s: %v", r.URL.Path, err), status)
 	return false
+}
+
+// decodeOne reads one JSON value, refusing unknown fields and anything but
+// whitespace after it. Token is io.EOF only at the true end of the input, which
+// More is not: it reports false for a stray "]" or "}".
+func decodeOne(r io.Reader, v any) error {
+	dec := json.NewDecoder(r)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	switch _, err := dec.Token(); err {
+	case io.EOF:
+		return nil
+	case nil:
+		return errors.New("unexpected data after the message")
+	default:
+		return err
+	}
 }
 
 // readErr keeps the first error the transport returned while the body was

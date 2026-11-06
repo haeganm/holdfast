@@ -148,6 +148,8 @@ mutants=(
   "node never counts a response that asks for too much|internal/node/node.go|s/\t\tn\.c\.rejected\.Add\(1\)\n\t\treturn fmt\.Errorf\(\"%s\/sync asked/\t\treturn fmt.Errorf(\"%s\/sync asked/"
   "node counts a cut-off response as a rejection|internal/node/node.go|s/\t\treturn fmt\.Errorf\(\"read response from/\t\tn.c.rejected.Add(1)\n\t\treturn fmt.Errorf(\"read response from/"
   "node merges a sync response before checking what it asks for|internal/node/node.go|s/\tif len\(resp\.Want\) > maxEntries \{/\t_ = n.receive(resp.HLC, resp.Tracks)\n\tif len(resp.Want) > maxEntries {/"
+  # wrap-up: refusing trailing content
+  "node accepts anything after a request|internal/node/node.go|s/\terr := decodeOne\(r\.Body, v\)\n/\tdec := json.NewDecoder(r.Body)\n\tdec.DisallowUnknownFields()\n\terr := dec.Decode(v)\n/"
 )
 
 work="$(mktemp -d)"
