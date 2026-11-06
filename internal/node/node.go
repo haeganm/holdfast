@@ -239,7 +239,15 @@ func (n *Node) holding() bool {
 	}
 	held := n.held
 	n.held = nil
-	for _, id := range slices.Sorted(maps.Keys(held)) {
+	ids := slices.Sorted(maps.Keys(held))
+	stored := n.tracks.Get(ids)
+	for _, id := range ids {
+		// The hold made this report late. Stamped over a fresher observation a
+		// peer delivered meanwhile, it would win everywhere and move the
+		// picture back.
+		if cur, ok := stored[id]; ok && cur.Obs.ObservedAtMS > held[id].ObservedAtMS {
+			continue
+		}
 		n.stamp(id, held[id])
 	}
 	return false

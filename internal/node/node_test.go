@@ -646,6 +646,42 @@ func TestStartupHoldKeepsTheLatestReportAndStampsItAfterTheHold(t *testing.T) {
 	}
 }
 
+// The hold makes a node's own reports late. A held report stamped over a
+// fresher observation a peer delivered meanwhile would sort above it on every
+// node and move the picture back, so it is skipped. A held report fresher than
+// what the peer delivered is still stamped.
+func TestTheHoldNeverStampsAReportOverAFresherOne(t *testing.T) {
+	now := time.UnixMilli(simStartMS)
+	n, err := New(Config{ID: "a", Now: func() time.Time { return now }, StartupHold: 5 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(100 * time.Millisecond)
+	n.Ingest("AAAAA1", obs(simStartMS+100))
+	now = now.Add(1900 * time.Millisecond)
+	n.Ingest("BBBBB1", obs(simStartMS+2000))
+	now = now.Add(time.Second)
+	peer := hlc.Timestamp{WallMS: simStartMS + 3000}
+	if err := n.receive(peer, map[crdt.ICAO]crdt.Track{
+		"AAAAA1": {Obs: obs(simStartMS + 3000), TS: peer, Origin: "b"}, // fresher than the held report
+		"BBBBB1": {Obs: obs(simStartMS + 1000), TS: peer, Origin: "b"}, // older than the held report
+	}); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(2 * time.Second)
+	n.Ingest("CCCCC1", obs(simStartMS+5000)) // the first report after the hold releases the rest
+	snap := n.tracks.Snapshot()
+	if got := snap["AAAAA1"]; got.Origin != "b" {
+		t.Errorf("the hold ended by stamping the report observed at +%d ms over the peer's from +3000 ms", got.Obs.ObservedAtMS-simStartMS)
+	}
+	if got := snap["BBBBB1"]; got.Origin != "a" {
+		t.Errorf("the held report from +2000 ms was dropped for the peer's from +%d ms", got.Obs.ObservedAtMS-simStartMS)
+	}
+	if c := n.Counters(); c.IngestRegress != 0 || len(snap) != 3 {
+		t.Errorf("ingest_regress=%d with %d aircraft, want 0 and 3", c.IngestRegress, len(snap))
+	}
+}
+
 // The hold also ends on a sync tick, so a node that goes quiet after starting
 // doesn't sit on its reports.
 func TestStartupHoldEndsOnASyncTick(t *testing.T) {

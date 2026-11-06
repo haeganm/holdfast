@@ -142,6 +142,7 @@ mutants=(
   "receive merges before advancing its clock|internal/node/node.go|s/\tn\.clock\.Update\(high\)\n\tfor id, t := range tracks \{/\t_ = high\n\tfor id, t := range tracks {/"
   "receive advances its clock only to the message stamp|internal/node/node.go|s/\tfor _, t := range tracks \{\n\t\tif t\.TS\.Compare\(high\) > 0 \{\n\t\t\thigh = t\.TS\n/\tfor _, t := range tracks {\n\t\tif t.TS.Compare(high) > 0 {\n\t\t\tcontinue\n/"
   "node lets a new aircraft into a full replica|internal/node/node.go|s/if n\.tracks\.Len\(\) < maxEntries \{/if true {/"
+  "the hold stamps a held report over a fresher one|internal/node/node.go|s/ok && cur\.Obs\.ObservedAtMS > held\[id\]\.ObservedAtMS/ok \&\& false \&\& cur.Obs.ObservedAtMS > held[id].ObservedAtMS/"
 )
 
 work="$(mktemp -d)"
