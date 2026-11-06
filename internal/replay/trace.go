@@ -168,14 +168,18 @@ func Read(r io.Reader) ([]Record, error) {
 	var recs []Record
 	sc := bufio.NewScanner(r)
 	for line := 1; sc.Scan(); line++ {
-		if len(strings.TrimSpace(sc.Text())) == 0 {
+		text := sc.Text()
+		if len(strings.TrimSpace(text)) == 0 {
 			continue
 		}
 		var rec Record
-		dec := json.NewDecoder(strings.NewReader(sc.Text()))
+		dec := json.NewDecoder(strings.NewReader(text))
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&rec); err != nil {
 			return nil, fmt.Errorf("line %d: %w", line, err)
+		}
+		if strings.TrimSpace(text[dec.InputOffset():]) != "" {
+			return nil, fmt.Errorf("line %d: more after the record", line)
 		}
 		if err := check(rec); err != nil {
 			return nil, fmt.Errorf("line %d: %w", line, err)
@@ -233,7 +237,9 @@ func ParseCircle(s string) (Circle, error) {
 		v[i] = f
 	}
 	c := Circle{Lat: v[0], Lon: v[1], RadiusKm: v[2]}
-	if c.Lat < -90 || c.Lat > 90 || c.Lon < -180 || c.Lon > 180 || !(c.RadiusKm > 0) {
+	// Each check passes only a good value, so a NaN fails it.
+	ok := c.Lat >= -90 && c.Lat <= 90 && c.Lon >= -180 && c.Lon <= 180 && c.RadiusKm > 0 && !math.IsInf(c.RadiusKm, 1)
+	if !ok {
 		return Circle{}, fmt.Errorf("coverage %q: out of range", s)
 	}
 	return c, nil

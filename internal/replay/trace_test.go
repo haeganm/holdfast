@@ -76,6 +76,11 @@ func TestReadRejectsBadLines(t *testing.T) {
 		{"bad node", `{"t_ms":0,"icao":"ABCDEF","lat":39,"lon":-77,"alt":1,"gs":1,"hdg":1,"node":"A B"}`, "node"},
 		{"negative delay", `{"t_ms":0,"icao":"ABCDEF","lat":39,"lon":-77,"alt":1,"gs":1,"hdg":1,"delay_ms":-1}`, "delay_ms"},
 		{"absurd delay", `{"t_ms":0,"icao":"ABCDEF","lat":39,"lon":-77,"alt":1,"gs":1,"hdg":1,"delay_ms":3600000}`, "delay_ms"},
+		// Read is the one check on a trace, so nothing on a line may hide
+		// behind its first record.
+		{"two records on a line", ok + ok, "line 1: more after the record"},
+		{"an invalid record and garbage after a valid one", ok + `{"t_ms":5,"icao":"ABCDEF","lat":91,"lon":-77,"alt":1,"gs":1,"hdg":1} trailing garbage`, "line 1: more after the record"},
+		{"a bracket after the record", ok + "]", "line 1: more after the record"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := Read(strings.NewReader(tc.input))
@@ -159,9 +164,12 @@ func TestCircle(t *testing.T) {
 	if !c.Contains(39.8, -77) || c.Contains(40, -77) {
 		t.Fatal("Contains disagrees with the distances")
 	}
-	for _, bad := range []string{"39,-77", "39,-77,0", "x,-77,10", "95,-77,10"} {
-		if _, err := ParseCircle(bad); err == nil {
-			t.Fatalf("ParseCircle(%q) accepted bad input", bad)
+	// A NaN fails every comparison, so it must fail the checks too, and a
+	// circle of infinite radius would take in every report there is.
+	for _, bad := range []string{"39,-77", "39,-77,0", "x,-77,10", "95,-77,10",
+		"NaN,NaN,60", "NaN,-77,60", "39,NaN,60", "39,-77,NaN", "39,-77,Inf", "39,-Inf,60"} {
+		if c, err := ParseCircle(bad); err == nil {
+			t.Errorf("ParseCircle(%q) accepted bad input as %+v", bad, c)
 		}
 	}
 }

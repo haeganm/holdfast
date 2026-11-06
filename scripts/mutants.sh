@@ -118,6 +118,9 @@ mutants=(
   "adsb: the first poll waits a whole interval|internal/adsb/adsb.go|s/\twait := f\.Every\n\tfor next := time\.Now\(\); ; \{/\twait := f.Every\n\tselect {\n\tcase <-ctx.Done():\n\t\treturn\n\tcase <-time.After(wait):\n\t}\n\tfor next := time.Now(); ; {/"
   "edge: the cloud token is never wired into the client|cmd/holdfast/main.go|s/client\.Transport = bearer\{/_ = bearer{/"
   "edge: the cloud token goes through a proxy in the clear|cmd/holdfast/main.go|s/\t\t\tdirect\.Proxy = nil\n//"
+  "replay: coverage lets a NaN through|internal/replay/trace.go|s/ok := c\.Lat >= -90 && c\.Lat <= 90 && c\.Lon >= -180 && c\.Lon <= 180 && c\.RadiusKm > 0/ok := !(c.Lat < -90 || c.Lat > 90 || c.Lon < -180 || c.Lon > 180) \&\& c.RadiusKm > 0/"
+  "replay: coverage takes an infinite radius|internal/replay/trace.go|s/ && !math\.IsInf\(c\.RadiusKm, 1\)//"
+  "replay: Read keeps a line's first record and drops the rest|internal/replay/trace.go|s/if strings\.TrimSpace\(text\[dec\.InputOffset\(\):\]\) != \"\" \{/if false {/"
 )
 
 work="$(mktemp -d)"
