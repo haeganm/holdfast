@@ -156,7 +156,12 @@ func record(sens sensors, feedURL string, every, dur time.Duration, out string) 
 		}
 		if now.Sub(shown) >= time.Minute {
 			shown = now
-			w.Flush() // so a killed recording keeps everything up to the last minute
+			// So a killed recording keeps everything up to the last minute. A
+			// failed flush (a full disk) stops the recording; the final Flush
+			// below returns the same error, so the run fails now, not at the hour.
+			if w.Flush() != nil {
+				cancel()
+			}
 			fmt.Fprintf(os.Stderr, "%s polls %d, failed %d, recorded %v\n", now.Sub(start).Round(time.Second), polls, failures, records)
 		}
 	}, func(err error) {
