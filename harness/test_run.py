@@ -4,8 +4,12 @@ formula can't quietly produce plausible numbers.
     python -m unittest discover -s harness
 """
 
+import http.server
+import itertools
+import json
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -319,6 +323,38 @@ class AwsTest(unittest.TestCase):
         self.assertIs(self.run_with_hashes(["x", "x", "x"], "x"), True)
         self.assertIs(self.run_with_hashes(["x", "x", "x"], "y"), False)
         self.assertIs(self.run_with_hashes(["x", "x", "z"], "x"), False)
+
+
+class PollErrorTest(unittest.TestCase):
+    def test_a_cut_off_or_garbled_poll_is_a_poll_error_not_the_end_of_the_sweep(self):
+        # One stub answers for every node. After the three readiness reads,
+        # its 5th answer is cut off mid-body and its 6th isn't JSON.
+        served = itertools.count(1)
+
+        class Node(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = json.dumps({"now_ms": h.now_ms(), "hash": "x", "counters": {}, "tracks": {}}).encode()
+                length, body = {5: (len(body), body[:10]), 6: (6, b"<html>")}.get(next(served), (len(body), body))
+                self.send_response(200)
+                self.send_header("Content-Length", str(length))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Node)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        run = h.Run(h.Config("test", "mesh", "loss0", "hlc", 0), 0, duration_ms=500, settle_ms_window=0)
+        with mock.patch.object(h, "sh", lambda *args, env=None: "0"), mock.patch.object(h, "LEAD_MS", 0), \
+                mock.patch.object(h, "PORT", dict.fromkeys(h.PORT, srv.server_address[1])):
+            h.execute(run)
+        self.assertEqual(len(run.errors), 2, run.errors)
+        self.assertIn("IncompleteRead", run.errors[0])
+        self.assertIn("Expecting value", run.errors[1])
+        self.assertTrue(run.polls, "the run stopped at the bad polls")
 
 
 class RunEnvTest(unittest.TestCase):

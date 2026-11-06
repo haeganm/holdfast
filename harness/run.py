@@ -102,6 +102,7 @@ import csv
 import datetime as dt
 import functools
 import gzip
+import http.client
 import json
 import math
 import os
@@ -111,7 +112,6 @@ import subprocess
 import sys
 import threading
 import time
-import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -279,6 +279,12 @@ def authorized(url: str, token: str) -> urllib.request.Request:
     return urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"} if token else {})
 
 
+# How a read of a node fails: down or slow (OSError, which urllib's URLError
+# is), cut off mid-body (http.client.HTTPException) or not JSON (ValueError).
+# Each is a failed read, recorded in the run, never the end of a sweep.
+READ_ERRORS = (OSError, http.client.HTTPException, ValueError)
+
+
 def get_state(node: str, token: str = "") -> dict:
     with urllib.request.urlopen(authorized(f"http://127.0.0.1:{PORT[node]}/state", token), timeout=2) as r:
         return json.load(r)
@@ -401,7 +407,7 @@ def execute(run: Run, keep_obs: bool = False) -> None:
                     st = get_state(n, auth.get(n, ""))
                     offsets.append(st["now_ms"] - (before + now_ms()) // 2)
                 break
-            except (OSError, urllib.error.URLError):
+            except READ_ERRORS:
                 if now_ms() > t0 - 2000:
                     raise RuntimeError("nodes not ready 2 s before the trace starts")
                 time.sleep(0.2)
@@ -457,7 +463,7 @@ def execute(run: Run, keep_obs: bool = False) -> None:
             try:
                 states = {n: get_state(n, auth.get(n, "")) for n in run.nodes}
                 run.polls.append(Poll(states[run.nodes[0]]["now_ms"] - t0, states))
-            except (OSError, urllib.error.URLError) as e:
+            except READ_ERRORS as e:
                 run.errors.append(f"poll at {host_rel} ms: {e}")
             next_poll += POLL_MS
             time.sleep(max(0, next_poll - now_ms()) / 1000)
@@ -467,7 +473,7 @@ def execute(run: Run, keep_obs: bool = False) -> None:
             try:
                 with urllib.request.urlopen(authorized(f"http://127.0.0.1:{PORT['cloud']}/peer", auth["cloud"]), timeout=5) as r:
                     run.extra["peer"] = json.load(r)
-            except (OSError, urllib.error.URLError) as e:
+            except READ_ERRORS as e:
                 run.errors.append(f"cloud peer counters: {e}")
         if cfg.topology == "aws":
             # Never polled during the run (every poll is an invocation and a
@@ -482,7 +488,7 @@ def execute(run: Run, keep_obs: bool = False) -> None:
                     check["edges"] = {n: get_state(n)["hash"] for n in EDGES}
                     with urllib.request.urlopen(authorized(env["CLOUD_PEER"] + "/hash", env["CLOUD_TOKEN"]), timeout=10) as r:
                         check["cloud"] = json.load(r)
-                except (OSError, urllib.error.URLError) as e:
+                except READ_ERRORS as e:
                     run.errors.append(f"cloud hash: {e}")
                     break
                 if set(check["edges"].values()) == {check["cloud"]["hash"]}:
