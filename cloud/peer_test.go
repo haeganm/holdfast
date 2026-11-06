@@ -224,8 +224,9 @@ func TestABadItemIsSkipped(t *testing.T) {
 
 // A bad item still holds its key and ord. A valid write for that aircraft has
 // to replace it whatever it holds: a corrupt ord that sorts high, a valid
-// track with a mismatched ord, no ord at all, or a track Restore refuses (a
-// stamp far in the future). Otherwise the aircraft is blocked for good.
+// track with a mismatched ord, no ord at all, an ord that isn't a string, or
+// a track Restore refuses (a stamp far in the future). Otherwise the
+// aircraft is blocked for good.
 func TestAValidWriteReplacesABadItem(t *testing.T) {
 	p := newPeer(t)
 	future := track(1, "b")
@@ -237,6 +238,9 @@ func TestAValidWriteReplacesABadItem(t *testing.T) {
 		"AAAAA2": {"t": &types.AttributeValueMemberS{Value: string(goodJSON)}, "ord": &types.AttributeValueMemberS{Value: "zzzzzzzz"}},
 		"AAAAA3": {"t": &types.AttributeValueMemberS{Value: "{not json"}},
 		"AAAAA4": {"t": &types.AttributeValueMemberS{Value: string(futureJSON)}, "ord": &types.AttributeValueMemberS{Value: crdt.Ord(future)}},
+		"AAAAA5": {"t": &types.AttributeValueMemberS{Value: "{not json"}, "ord": &types.AttributeValueMemberN{Value: "1"}},
+		"AAAAA6": {"t": &types.AttributeValueMemberS{Value: "{not json"}, "ord": &types.AttributeValueMemberBOOL{Value: false}},
+		"AAAAA7": {"t": &types.AttributeValueMemberS{Value: "{not json"}, "ord": &types.AttributeValueMemberNULL{Value: true}},
 	}
 	valid := map[crdt.ICAO]crdt.Track{}
 	for id, item := range bad {

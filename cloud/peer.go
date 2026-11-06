@@ -230,8 +230,9 @@ func (p *peer) save(ctx context.Context, tracks map[crdt.ICAO]crdt.Track, replac
 
 // put writes t if the stored track sorts below it. When this request found
 // the stored item bad, it may also replace exactly that item: by its ord if
-// it had one, or because it has none. If another invocation replaced it in
-// the meantime, the ordinary condition decides.
+// that was a string, or because it has no string ord (none, or a number, a
+// bool or a null, which no string compares with). If another invocation
+// replaced it in the meantime, the ordinary condition decides.
 func (p *peer) put(ctx context.Context, id crdt.ICAO, t crdt.Track, badOrd string, bad bool) (bool, error) {
 	body, err := json.Marshal(t)
 	if err != nil {
@@ -246,7 +247,8 @@ func (p *peer) put(ctx context.Context, id crdt.ICAO, t crdt.Track, badOrd strin
 		cond += " OR ord = :bad"
 		values[":bad"] = &types.AttributeValueMemberS{Value: badOrd}
 	case bad:
-		cond += " OR attribute_not_exists(ord)"
+		cond += " OR NOT attribute_type(ord, :s)"
+		values[":s"] = &types.AttributeValueMemberS{Value: "S"}
 	}
 	_, err = p.db.PutItem(ctx, &dynamodb.PutItemInput{
 		TableName: &p.table,

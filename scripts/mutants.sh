@@ -108,6 +108,8 @@ mutants=(
   "harness: the smoke gate passes a cut that never recovered|harness/run.py|s/and healed and row\[\"recover_p95_ms\"\] == \"\":/and False:/"
   "harness: the smoke gate passes a run that held reports at startup|harness/run.py|s/if row\[\"ingest_held\"\]:/if False:/"
   "harness: the smoke gate passes a cloud table that ended different|harness/run.py|s/if row\[\"cloud_matches\"\] is False:/if False:/"
+  # W2: the edge, the feed, the trace reader and the cloud peer
+  "cloud: a bad item whose ord isn't a string can't be replaced|cloud/peer.go|s/cond \+= \" OR NOT attribute_type\(ord, :s\)\"\n\t\tvalues\[\":s\"\] = &types\.AttributeValueMemberS\{Value: \"S\"\}/cond += \" OR attribute_not_exists(ord)\"/"
 )
 
 work="$(mktemp -d)"
