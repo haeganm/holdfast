@@ -139,6 +139,157 @@ class AnalyzeTest(unittest.TestCase):
         self.assertEqual(self.analyze()["wrong_final"], 1)  # a still holds the 5000 report
 
 
+class PublishedColumnsTest(unittest.TestCase):
+    """One recorded-trace run that every column of the summary row is pinned
+    on. Its window starts 60 s into the trace. a reports X, its reports
+    received 200 ms after each was observed, every second from 1000 (the
+    first two inside the warm-up); b reports Y, 6 s late, every second from
+    4500. Each node gets a peer's report 300 ms after its receipt, except c,
+    cut from 4000 until the heal at 8000: c catches up at 8300 and gets b's
+    last report only at 10_300, after ingest. Before Y's first report c
+    holds no Y, and through the cut it holds none while Y gets three more.
+    Polls every 500 ms; times are ms since the trace start."""
+
+    X, Y = "AAAAAA", "BBBBBB"
+    DELAY = {X: 200, Y: 6000}
+    OWNER = {X: "a", Y: "b"}
+    RECEIVED = {X: range(1000, 10_000, 1000), Y: range(4500, 10_000, 1000)}
+    # node -> aircraft -> (from when the node holds it, the receipt of the report it holds)
+    HOLDS = {
+        "a": {X: [(r, r) for r in RECEIVED[X]], Y: [(r + 300, r) for r in RECEIVED[Y]]},
+        "b": {X: [(r + 300, r) for r in RECEIVED[X]], Y: [(r, r) for r in RECEIVED[Y]]},
+        "c": {X: [(1300, 1000), (2300, 2000), (3300, 3000), (8300, 8000), (9300, 9000)],
+              Y: [(8300, 7500), (8800, 8500), (10_300, 9500)]},
+    }
+    CUT_FAILS = range(4000, 8000, 500)  # c's sync rounds that fail during the cut, one per 500 ms
+
+    def poll_at(self, t):
+        states = {}
+        for n, holds in self.HOLDS.items():
+            tracks, counters = {}, {"ingest_total": 0, "merge_applied": 0}
+            for ac, held in holds.items():
+                got = [r for since, r in held if since <= t]
+                if not got:
+                    continue
+                obs = T0 + got[-1] - self.DELAY[ac]
+                tracks[ac] = {"ts": {"w": T0 + got[-1], "l": 0}, "origin": self.OWNER[ac], "at": obs}
+                if self.OWNER[ac] == n:
+                    tracks[ac]["own"] = obs
+                counters["ingest_total" if self.OWNER[ac] == n else "merge_applied"] += len(got)
+            fails = sum(1 for k in self.CUT_FAILS if k <= t) if n == "c" else 0
+            counters |= {"sync_ok": t // 500 - fails, "sync_err": fails}
+            if n == "a" and t == 11_000:  # every other counter, each its own value
+                counters |= {"ingest_lost": 11, "ingest_held": 12, "ingest_regress": 13, "expired": 14,
+                             "merge_expired": 15, "sensor_errors": 16, "merge_regress": 17, "rejected": 18, "aborted": 19}
+            held = repr(sorted((ac, tr["ts"]["w"], tr["at"]) for ac, tr in tracks.items()))
+            states[n] = state(t, tracks, held, counters)
+        return h.Poll(t, states)
+
+    def setUp(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        (Path(d.name) / "traces").mkdir()
+        (Path(d.name) / "traces" / "fixture.jsonl").write_text("".join(
+            json.dumps({"t_ms": 60_000 + r, "icao": ac, "node": self.OWNER[ac], "delay_ms": self.DELAY[ac]}) + "\n"
+            for ac in (self.X, self.Y) for r in self.RECEIVED[ac]))
+        patch = mock.patch.object(h, "ROOT", Path(d.name))
+        patch.start()
+        self.addCleanup(patch.stop)
+        h.trace_records.cache_clear()
+        self.addCleanup(h.trace_records.cache_clear)
+        self.dir = Path(d.name)
+        self.run_ = h.Run(h.Config("test", "mesh", "partition", "hlc", 0, "fixture.jsonl"), 0, duration_ms=10_000,
+                          settle_ms_window=1000, trace_from_ms=60_000, vm_offset_ms=12, commit="abc1234",
+                          errors=["poll at 120 ms: timed out", "poll at 9620 ms: timed out"])
+        self.run_.polls = [self.poll_at(t) for t in range(0, 11_001, 500)]
+        self.run_.events = {"tx:start": 0, "tx:start_exec": 30, "cut": 4000, "cut_exec": 100, "heal": 8000,
+                            "heal_exec": 50, "tx:end": 10_020, "tx:end_exec": 30}
+        self.run_.tx = {"start": {"a": 1000, "b": 2000, "c": 3000}, "end": {"a": 31_000, "b": 32_000, "c": 15_000}}
+
+    def test_every_column(self):
+        row = h.analyze(self.run_, self.dir / "polls.csv")
+        self.assertEqual(row, {
+            "run_id": "test-mesh-partition-hlc-skew0-r0", "family": "test", "topology": "mesh", "scenario": "partition",
+            "clock": "hlc", "skew_ms": 0, "source": "fixture.jsonl", "trace_from_ms": 60_000, "repeat": 0,
+            "duration_ms": 10_000,
+            # hashes first agree at 10_500, once c holds Y's last report
+            "settled": True, "settle_ms": 500,
+            # before the cut the worst lag, and so the p95 of a poll's 6, is 1000; c is back under it at 8500
+            "recover_p95_ms": 500, "recover_all_ms": 500,
+            "cut_at_ms": 4000, "heal_at_ms": 8000, "heal_exec_ms": 50,
+            # 6100 to 8000: b got X's 7000 report and a Y's 6500 one
+            "merged_cut": 2,
+            "catchup_ms": 500, "catchup_merge_ms": 500,
+            # the edges disagree at every ingest poll but 3500 until the heal, then on one aircraft of two
+            "diverge_mean": 0.8, "diverge_max": 1.0, "diverge_cut": 1.0,
+            # 26 pairs after the warm-up: 17 delivered in 500, the 8 c missed in the cut 1000 to 4500
+            # after their receipts, and Y's last at c in 1000
+            "prop_p50": 500, "prop_p95": 4000, "prop_p99": 4500, "prop_n": 26, "prop_unresolved": 0.0,
+            "lag_p95": 3000, "lag_worst": 5000,  # 81 lags; c's X, 5000 behind just before the heal
+            # 45 ages of X, under 5.3 s, and 36 of Y, 6 s and more: Y's reports arrive 6 s old, yet its
+            # last report is always under 5 s old, so it counts
+            "stale_p50": 3200, "stale_p99": 9500,
+            "behind_frac": 0.0778,
+            "aircraft": 2, "overlap_frac": 0.0,
+            "ingest_total": 15, "ingest_lost": 11, "ingest_held": 12, "ingest_regress": 13, "expired": 14,
+            "merge_expired": 15, "sensor_errors": 16,
+            "merge_applied": 23, "merge_regress": 17, "wrong_final": 0,
+            "sync_ok": 58, "sync_err": 8, "sync_err_rate": 0.1212, "rejected": 18, "aborted": 19,
+            # 72,000 bytes over 15 reports, and over the 22 merges the edges made by 10_000, the last
+            # poll before tx:end; c's merge at 10_300 rides on bytes nobody counted
+            "wire_bytes_per_obs": 4800.0, "wire_bytes_per_useful": 3272.7,
+            "feed_delay_p50": 200, "feed_delay_p99": 6000,
+            "cloud_requests": "", "cloud_writes": "", "cloud_won": "", "cloud_failed": "", "cloud_writes_per_report": "",
+            "cloud_matches": "", "cloud_check_tries": "",
+            "polls": 23, "poll_ms_mean": 500.0, "vm_offset_ms": 12, "commit": "abc1234",
+            "errors": "poll at 120 ms: timed out | poll at 9620 ms: timed out",
+        })
+
+    def test_p95_recovery_reads_the_pooled_p95_not_the_worst_lag(self):
+        # 7 aircraft, so a poll pools 21 lags and its p95 can sit below its
+        # worst. After the heal c catches up on all but G: the pooled p95 is
+        # back at its floor at 8500, the worst lag only at 9000.
+        run = h.Run(h.Config("test", "mesh", "partition", "hlc", 0), 0, duration_ms=10_000, settle_ms_window=0)
+        run.events = {"cut": 4000, "cut_exec": 100, "heal": 8000}
+        aircraft = "ABCDEFG"
+
+        def at(t, own, b, c):
+            return poll(t, a=state(t, {ac * 6: {"ts": {}, "origin": "a", "at": T0 + own, "own": T0 + own} for ac in aircraft}),
+                        b=state(t, {ac * 6: {"ts": {}, "origin": "a", "at": T0 + b.get(ac, own)} for ac in aircraft}),
+                        c=state(t, {ac * 6: {"ts": {}, "origin": "a", "at": T0 + c.get(ac, own)} for ac in aircraft}))
+
+        run.polls = [at(2000, 2000, {}, {}), at(3000, 3000, {"G": 2000}, {}),  # worst 1000, p95 0
+                     at(8000, 8000, {}, dict.fromkeys(aircraft, 4000)), at(8500, 8000, {}, {"G": 4000}),
+                     at(9000, 8000, {}, {})]
+        with tempfile.TemporaryDirectory() as d:
+            row = h.analyze(run, Path(d) / "polls.csv")
+        self.assertEqual((row["recover_p95_ms"], row["recover_all_ms"]), (500, 1000))
+
+
+class SmokeGateTest(unittest.TestCase):
+    CLEAN = {"run_id": "r", "settled": True, "errors": "", "rejected": 0, "recover_p95_ms": 300, "ingest_held": 0,
+             "cloud_matches": ""}
+
+    def test_a_clean_run_passes(self):
+        self.assertEqual(h.failures_of(self.CLEAN, "partition", True), [])
+
+    def test_each_way_a_run_fails_the_gate(self):
+        for change, scenario, healed, want in (
+            ({"settled": False}, "loss0", True, ["r"]),
+            ({"errors": "poll at 5 ms: timed out"}, "loss0", True, ["r"]),
+            ({"rejected": 1}, "loss0", True, ["r"]),
+            ({"recover_p95_ms": ""}, "partition", True, ["r (never recovered)"]),
+            ({"recover_p95_ms": ""}, "hubdown", True, ["r (never recovered)"]),
+            ({"recover_p95_ms": ""}, "loss0", True, []),  # nothing was cut
+            # --no-heal: a cut that never heals has nothing to recover from, but its nodes never settle
+            ({"recover_p95_ms": "", "settled": False}, "partition", False, ["r"]),
+            ({"ingest_held": 3}, "loss0", True, ["r (reports held at startup: the run measured the startup hold)"]),
+            ({"cloud_matches": False}, "loss0", True, ["r (the cloud's table ended different from the edges')"]),
+        ):
+            with self.subTest(change=change, scenario=scenario, healed=healed):
+                self.assertEqual(h.failures_of(dict(self.CLEAN, **change), scenario, healed), want)
+
+
 class RecoveryAllTest(unittest.TestCase):
     # (t, worst lag of any edge node on any aircraft); worst before the cut: 2000
     BEFORE = [(3000, 1000), (4000, 2000)]
