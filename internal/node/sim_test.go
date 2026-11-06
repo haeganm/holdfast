@@ -186,16 +186,26 @@ func (s *sim) start(sn *simNode) {
 	n, err := New(Config{
 		ID:   sn.id,
 		Wall: s.wall,
-		// Now is this node's physical clock reading, error included: clock
-		// jumps change offsetMS under a running node, which ClockOffset can't.
-		Now:      func() time.Time { return time.UnixMilli(s.trueMS + sn.offsetMS) },
-		Client:   &http.Client{Transport: simTransport{s, sn.id}},
-		TrackTTL: simTTL,
+		// Now is true time and the clock's error goes in through ClockOffset,
+		// as in the clock-skew runs, so the node's own clock and true time
+		// differ in every schedule. Clock jumps change the error under a
+		// running node (jump).
+		Now:         func() time.Time { return time.UnixMilli(s.trueMS) },
+		ClockOffset: time.Duration(sn.offsetMS) * time.Millisecond,
+		Client:      &http.Client{Transport: simTransport{s, sn.id}},
+		TrackTTL:    simTTL,
 	})
 	if err != nil {
 		s.t.Fatal(err)
 	}
 	sn.n, sn.seen, sn.clock, sn.gone = n, nil, hlc.Timestamp{}, map[crdt.ICAO]crdt.Track{}
+}
+
+// jump steps a running node's physical clock to offsetMS from true time, as
+// an NTP correction or a failing clock would.
+func (sn *simNode) jump(offsetMS int64) {
+	sn.offsetMS = offsetMS
+	sn.n.offset = time.Duration(offsetMS) * time.Millisecond
 }
 
 func (s *sim) failf(format string, args ...any) {
@@ -240,7 +250,7 @@ func (s *sim) run(steps int) {
 			l := link(a.id, s.other(a).id)
 			s.cut[l] = !s.cut[l]
 		case r < 94:
-			s.pick().offsetMS = s.randomOffset()
+			s.pick().jump(s.randomOffset())
 		case r < 97:
 			s.start(s.pick())
 			s.seen.restarts++
@@ -383,7 +393,7 @@ func (s *sim) settle() {
 	s.faulty = false
 	clear(s.cut)
 	for _, sn := range s.nodes {
-		sn.offsetMS = 0 // replicas agree on expiry only to within their clock spread
+		sn.jump(0) // replicas agree on expiry only to within their clock spread
 	}
 	for _, h := range s.held {
 		s.deliver(h.to, h.path, bytes.NewReader(h.body)).Body.Close()

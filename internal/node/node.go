@@ -133,7 +133,7 @@ type Node struct {
 	ttl      time.Duration
 	cut      atomic.Int64 // the highest expiry cutoff so far; see cutoff
 	trueNow  func() time.Time
-	physNow  func() time.Time
+	offset   time.Duration // the physical clock's error, Config.ClockOffset; see physNow
 	clock    *hlc.Clock
 	tracks   *crdt.Map
 	client   *http.Client
@@ -181,29 +181,31 @@ func New(cfg Config) (*Node, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.DiscardHandler)
 	}
-	trueNow, offset := cfg.Now, cfg.ClockOffset
-	physNow := func() time.Time { return trueNow().Add(offset) }
 	n := &Node{
 		id:       cfg.ID,
 		peers:    cfg.Peers,
 		interval: cfg.SyncInterval,
 		maxDrift: cfg.MaxDrift,
 		ttl:      cfg.TrackTTL,
-		trueNow:  trueNow,
-		physNow:  physNow,
-		clock:    hlc.New(physNow, cfg.Wall),
+		trueNow:  cfg.Now,
+		offset:   cfg.ClockOffset,
 		tracks:   crdt.NewMap(),
 		client:   cfg.Client,
 		log:      cfg.Logger.With("node", cfg.ID),
 		own:      map[crdt.ICAO]int64{},
 	}
+	n.clock = hlc.New(n.physNow, cfg.Wall)
 	n.cut.Store(math.MinInt64)
 	if cfg.StartupHold > 0 && !cfg.Wall {
 		n.held = map[crdt.ICAO]crdt.Observation{}
-		n.holdUntilMS = physNow().Add(cfg.StartupHold).UnixMilli()
+		n.holdUntilMS = n.physNow().Add(cfg.StartupHold).UnixMilli()
 	}
 	return n, nil
 }
+
+// physNow is this node's own physical clock, the one that drives its HLC:
+// true time plus the clock's error.
+func (n *Node) physNow() time.Time { return n.trueNow().Add(n.offset) }
 
 // Ingest stamps a local observation and merges it into the replica, or keeps
 // it until the startup hold ends.

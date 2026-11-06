@@ -134,6 +134,9 @@ mutants=(
   "node accepts a negative stamp|internal/node/node.go|s/if ts\.WallMS < 0 \{/if false {/"
   "node accepts any longitude|internal/node/node.go|s/ \|\| o\.Lon < -180 \|\| o\.Lon > 180//"
   "node accepts any origin in a digest|internal/node/node.go|s/if !originRe\.MatchString\(v\.Origin\) \{/if false {/"
+  "node checks drift against true time, not its own clock|internal/node/node.go|s/error \{\n\tlimit := n\.physNow\(\)/error {\n\tlimit := n.trueNow()/"
+  "the startup hold ends on true time, not the node's own clock|internal/node/node.go|s/if n\.physNow\(\)\.UnixMilli\(\) < n\.holdUntilMS \{/if n.trueNow().UnixMilli() < n.holdUntilMS {/"
+  "state reports the skewed clock as true time|internal/node/node.go|s/NowMS: n\.trueNow\(\)/NowMS: n.physNow()/"
 )
 
 work="$(mktemp -d)"

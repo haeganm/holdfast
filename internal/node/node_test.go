@@ -183,6 +183,58 @@ func TestSlowClockFreshWriteWinsOnlyUnderHLC(t *testing.T) {
 	}
 }
 
+// The clock-skew runs give a node its clock error through ClockOffset, and the
+// node's own clock is the only one a real node has. So the drift bound is
+// measured on it: a node 10 s slow refuses a stamp 10 s ahead of its clock,
+// though that stamp is true time, and takes one 4 s ahead.
+func TestDriftIsMeasuredOnTheNodesOwnClock(t *testing.T) {
+	n, err := New(Config{ID: "a", Now: func() time.Time { return time.UnixMilli(simStartMS) },
+		ClockOffset: -10 * time.Second, StartupHold: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := n.receive(hlc.Timestamp{WallMS: simStartMS}, nil); err == nil {
+		t.Fatal("a node 10 s slow accepted a stamp 10 s ahead of its own clock")
+	}
+	if err := n.receive(hlc.Timestamp{WallMS: simStartMS - 6000}, nil); err != nil {
+		t.Fatalf("a stamp 4 s ahead of the node's own clock was refused: %v", err)
+	}
+}
+
+// The startup hold lasts its full length on the node's own clock, the one its
+// stamps come from. Timed against true time, a node 3 s slow would end a 5 s
+// hold after 2 s.
+func TestTheStartupHoldRunsOnTheNodesOwnClock(t *testing.T) {
+	now := time.UnixMilli(simStartMS)
+	n, err := New(Config{ID: "a", Now: func() time.Time { return now }, ClockOffset: -3 * time.Second, StartupHold: 5 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(4 * time.Second)
+	n.Ingest("AAAAA1", obs(simStartMS+4000))
+	if n.tracks.Len() != 0 {
+		t.Fatal("a report was stamped 4 s into a 5 s startup hold")
+	}
+	now = now.Add(time.Second)
+	n.Ingest("AAAAA2", obs(simStartMS+5000))
+	if n.tracks.Len() != 2 {
+		t.Fatalf("%d aircraft stored 5 s after the start, want both: the hold is over", n.tracks.Len())
+	}
+}
+
+// now_ms is the harness's time base for every staleness and lag number, so
+// /state reports true time whatever the node's own clock reads.
+func TestStateReportsTrueTime(t *testing.T) {
+	n, err := New(Config{ID: "a", Now: func() time.Time { return time.UnixMilli(simStartMS) },
+		ClockOffset: 2 * time.Second, StartupHold: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := n.Snapshot().NowMS; got != simStartMS {
+		t.Fatalf("now_ms = %d with the clock 2 s fast, want true time %d", got, int64(simStartMS))
+	}
+}
+
 func newLoneNode(t *testing.T) (*Node, *httptest.Server) {
 	t.Helper()
 	n, err := New(Config{ID: "a", StartupHold: -1})
