@@ -81,8 +81,12 @@ Definitions used throughout:
                        a later write of an older observation, which catchup_ms waits on
                        until a fresher report comes; this asks only that nothing from
                        before the heal is missing. Added after predictions-2.
-    wire_bytes_per_useful  wire bytes during ingest divided by merges that won (updates
-                       that changed some node's picture). Added after the predictions.
+    wire_bytes_per_useful  wire bytes during ingest divided by the merges that won (updates
+                       that changed some node's picture) at the edge nodes over the same
+                       window: from the first poll to the last one at or before tx:end.
+                       The hub and the cloud peer only relay, so their merges don't
+                       count. Added after the predictions. It first counted every node's
+                       merges up to the last poll, the hub's and the settle window's too.
     merged_cut         received tracks the edge nodes merged while a cut was fully in
                        force (one client timeout after the cut, until the heal); added
                        after the predictions
@@ -796,8 +800,13 @@ def analyze(run: Run, polls_path: Path) -> dict:
         sent = sum(run.tx["end"][n] - run.tx["start"][n] for n in run.nodes)
         if ingest:
             wire = round(sent / ingest, 1)
-        if totals.get("merge_applied"):
-            useful = round(sent / totals["merge_applied"], 1)
+        # Merges over the bytes' own window, at the edges: a relay's merges
+        # aren't updates anyone sees.
+        upto = [p.states for p in run.polls if p.t <= run.events["tx:end"]]
+        merges = sum(upto[-1][n]["counters"].get("merge_applied", 0) - first[n]["counters"].get("merge_applied", 0)
+                     for n in EDGES) if upto else 0
+        if merges:
+            useful = round(sent / merges, 1)
 
     gaps = [b.t - a.t for a, b in zip(run.polls, run.polls[1:])]
     sync_total = totals.get("sync_ok", 0) + totals.get("sync_err", 0)

@@ -82,9 +82,27 @@ class AnalyzeTest(unittest.TestCase):
 
     def test_bytes_per_report_and_per_useful_update(self):
         self.exp.tx = {"start": {n: 100 for n in h.EDGES}, "end": {n: 400 for n in h.EDGES}}
+        self.exp.events = {"tx:start": 0, "tx:end": 10_400}
         row = self.analyze()
         self.assertEqual(row["wire_bytes_per_obs"], 33.3)  # 900 bytes over 27 reports
         self.assertEqual(row["wire_bytes_per_useful"], 100.0)  # 900 bytes over 9 winning merges
+
+    def test_useful_updates_are_the_edges_merges_while_the_bytes_were_counted(self):
+        # The hub relays, so its merges are no update anyone sees, and merges
+        # after tx:end ride on bytes nobody counted.
+        run = h.Run(h.Config("test", "star", "loss0", "hlc", 0), 0, duration_ms=10_000, settle_ms_window=5000)
+
+        def at(t, edge, hub):
+            return poll(t, hub=state(t, {}, counters={"merge_applied": hub}),
+                        **{n: state(t, {}, counters={"merge_applied": edge}) for n in h.EDGES})
+
+        run.polls = [at(-5000, 0, 0), at(9900, 2, 6), at(12_000, 3, 9)]
+        run.events = {"tx:start": 0, "tx:end": 10_000}
+        run.tx = {"start": dict.fromkeys(run.nodes, 0), "end": dict.fromkeys(run.nodes, 1000)}
+        with tempfile.TemporaryDirectory() as d:
+            row = h.analyze(run, Path(d) / "polls.csv")
+        self.assertEqual(row["wire_bytes_per_useful"], 666.7)  # 4000 bytes over the edges' 6 merges by tx:end
+        self.assertEqual(row["merge_applied"], 18)  # the column itself still counts every node to the last poll
 
     def test_unequal_hashes_never_settle(self):
         last = self.exp.polls[-1].states
@@ -385,7 +403,7 @@ class RawRoundTripTest(unittest.TestCase):
         exp = h.Run(cfg, 2, duration_ms=10_000, settle_ms_window=5000, commit="abc1234")
         exp.polls = [poll(t, a=state(t, mine, "1"), b=state(t, mine, "1"), c=state(t, mine, "1"))
                      for t in (0, 4000, 9000, 10_400)]
-        exp.events = {"cut": 4000, "heal": 8000}
+        exp.events = {"tx:start": 0, "cut": 4000, "heal": 8000, "tx:end": 10_000}
         exp.tx = {"start": {"a": 10, "b": 10, "c": 10}, "end": {"a": 110, "b": 210, "c": 310}}
         with tempfile.TemporaryDirectory() as d:
             raw = Path(d) / "raw" / "x.json.gz"

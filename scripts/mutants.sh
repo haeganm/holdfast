@@ -79,12 +79,14 @@ mutants=(
   "harness: staleness counts aircraft long gone quiet|harness/run.py|s/if ingesting and now - heard\[ac\] <= ACTIVE_MS:/if ingesting:/"
   "harness: divergence treats a missing aircraft as agreement|harness/run.py|s/len\(\{value\(t, ac\) for t in held\}\) > 1/len({value(t, ac) for t in held} - {None}) > 1/"
   "harness: catch-up ignores what was reported by the heal|harness/run.py|s/\.get\(\"at\", 0\) >= at$/.get(\"at\", 0) >= 0/m"
-  "harness: bytes per useful update divides by every report|harness/run.py|s/useful = round\(sent \/ totals\[\"merge_applied\"\], 1\)/useful = round(sent \/ ingest, 1)/"
+  "harness: bytes per useful update divides by every report|harness/run.py|s/useful = round\(sent \/ merges, 1\)/useful = round(sent \/ ingest, 1)/"
   "harness: propagation ignores the first receipt|harness/run.py|s/out\.append\(now - q\.pop\(0\)\[1\]\)/out.append(now - q.pop(0)[0])/"
   "harness: receipts keep the last receipt, not the first|harness/run.py|s/first\[key\] = min\(first\.get\(key, got\), got\)/first[key] = got/"
   "harness: settle ignores unequal hashes|harness/run.py|s/and len\(\{p\.states\[n\]\[\"hash\"\] for n in run\.nodes\}\) == 1/and True/"
   # W3: the harness's published columns, its smoke gate, its labels and its reads of a node
   "harness: staleness counts an aircraft from its observation, not its receipt|harness/run.py|s/heard\[ac\] = max\(heard\.get\(ac, 0\), receipt\.get\(\(ac, own\), own\)\)/heard[ac] = max(heard.get(ac, 0), own)/"
+  "harness: bytes per useful update counts the hub's relay merges|harness/run.py|s/for n in EDGES\) if upto else 0/for n in run.nodes) if upto else 0/"
+  "harness: bytes per useful update counts merges after the bytes stopped|harness/run.py|s/upto = \[p\.states for p in run\.polls if p\.t <= run\.events\[\"tx:end\"\]\]/upto = [p.states for p in run.polls]/"
 )
 
 work="$(mktemp -d)"
