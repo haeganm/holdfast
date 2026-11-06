@@ -101,7 +101,14 @@ func TestOrdOrdersLikeCompare(t *testing.T) {
 	nums := []float64{math.Inf(-1), -1e9, -1.5, -0.25, math.Copysign(0, -1), 0, 0.25, 1.5, 1e9, math.Inf(1)}
 	walls := []int64{0, 1, 1_700_000_000_000, 1_700_000_000_001}
 	logicals := []uint32{0, 1, 9, 15, 16, 255, 4096, hlc.MaxLogical}
-	// Every pair of stamps first, so the stamp encoding can't pass by luck.
+	agree := func(a, b Track) {
+		t.Helper()
+		if got, want := cmp.Compare(Ord(a), Ord(b)), Compare(a, b); got != want {
+			t.Fatalf("Ord orders %+v against %+v as %d, Compare as %d", a, b, got, want)
+		}
+	}
+	// Every pair of stamps, and every pair of origins, first: either encoding
+	// can go wrong at a length boundary, which random pairs hit only by luck.
 	var stamps []hlc.Timestamp
 	for _, w := range walls {
 		for _, l := range logicals {
@@ -110,10 +117,12 @@ func TestOrdOrdersLikeCompare(t *testing.T) {
 	}
 	for _, x := range stamps {
 		for _, y := range stamps {
-			a, b := Track{TS: x, Origin: "a"}, Track{TS: y, Origin: "a"}
-			if got, want := cmp.Compare(Ord(a), Ord(b)), Compare(a, b); got != want {
-				t.Fatalf("Ord orders stamp %v against %v as %d, Compare as %d", x, y, got, want)
-			}
+			agree(Track{TS: x, Origin: "a"}, Track{TS: y, Origin: "a"})
+		}
+	}
+	for _, x := range origins {
+		for _, y := range origins {
+			agree(Track{Origin: x}, Track{Origin: y})
 		}
 	}
 	prop := func(seed uint64) bool {
