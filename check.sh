@@ -26,8 +26,9 @@ step() { printf '\n== %s\n' "$*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 step "line endings"
-if git ls-files --eol | grep -q 'i/crlf'; then
-  git ls-files --eol | grep 'i/crlf' >&2
+# No grep -q: it exits at the first match, git then dies of SIGPIPE, and under
+# pipefail the whole test reads false, so CRLF early in the listing got through.
+if git ls-files --eol | grep -E 'i/(crlf|mixed)' >&2; then
   fail "CRLF in the index; scripts with CRLF break inside the containers"
 fi
 
