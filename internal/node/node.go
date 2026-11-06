@@ -646,7 +646,7 @@ func (n *Node) handleSync(w http.ResponseWriter, r *http.Request) {
 	cut := n.cutoff()
 	maps.DeleteFunc(req.Digest, func(_ crdt.ICAO, v crdt.Version) bool { return v.TS.WallMS < cut })
 	newer, want := n.tracks.Diff(req.Digest)
-	writeJSON(w, syncResponse{HLC: n.clock.Now(), Tracks: newer, Want: want})
+	n.writeJSON(w, syncResponse{HLC: n.clock.Now(), Tracks: newer, Want: want})
 }
 
 func (n *Node) handlePush(w http.ResponseWriter, r *http.Request) {
@@ -715,7 +715,7 @@ func (n *Node) Hash() string { return crdt.HashOf(n.tracks.Snapshot()) }
 
 func (n *Node) handleHash(w http.ResponseWriter, _ *http.Request) {
 	snap := n.tracks.Snapshot()
-	writeJSON(w, map[string]any{"hash": crdt.HashOf(snap), "n": len(snap)})
+	n.writeJSON(w, map[string]any{"hash": crdt.HashOf(snap), "n": len(snap)})
 }
 
 // State is what the experiment harness polls.
@@ -748,7 +748,7 @@ func (n *Node) Snapshot() State {
 	return State{ID: n.id, NowMS: n.trueNow().UnixMilli(), Hash: crdt.HashOf(snap), Counters: counters, Tracks: tracks}
 }
 
-func (n *Node) handleState(w http.ResponseWriter, _ *http.Request) { writeJSON(w, n.Snapshot()) }
+func (n *Node) handleState(w http.ResponseWriter, _ *http.Request) { n.writeJSON(w, n.Snapshot()) }
 
 // Counters returns a copy of the counters.
 func (n *Node) Counters() Counters {
@@ -809,10 +809,10 @@ func (n *Node) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	w.Write(b.Bytes())
 }
 
-func writeJSON(w http.ResponseWriter, v any) {
+func (n *Node) writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		// The status line is already sent; the client will see a truncated body.
-		slog.Default().Warn("write response", "err", err)
+		n.log.Warn("write response", "err", err)
 	}
 }
