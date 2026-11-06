@@ -278,11 +278,7 @@ func (n *Node) stamp(id crdt.ICAO, obs crdt.Observation) {
 // already holds maxEntries. Callers hold mu, which every write to the replica
 // takes, so the answer still holds when they put.
 func (n *Node) full(id crdt.ICAO) bool {
-	if n.tracks.Len() < maxEntries {
-		return false
-	}
-	_, held := n.tracks.Get([]crdt.ICAO{id})[id]
-	return !held
+	return n.tracks.Len() >= maxEntries && !n.tracks.Has(id)
 }
 
 // cutoff is the wall time before which a stored stamp has expired. It only

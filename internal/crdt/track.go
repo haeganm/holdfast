@@ -239,6 +239,14 @@ func (m *Map) Len() int {
 	return len(m.m)
 }
 
+// Has reports whether the replica holds a track for id.
+func (m *Map) Has(id ICAO) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	_, ok := m.m[id]
+	return ok
+}
+
 // HashOf returns a hex SHA-256 of a snapshot's contents. Two snapshots have
 // the same hash exactly when they hold equal tracks for the same aircraft.
 func HashOf(tracks map[ICAO]Track) string {
