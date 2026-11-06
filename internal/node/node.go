@@ -631,11 +631,11 @@ func (n *Node) handleSync(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := checkDigest(req.Digest); err != nil {
 		n.c.rejected.Add(1)
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		refuse(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	if err := n.receive(req.HLC, nil); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		refuse(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	n.expire()
@@ -653,7 +653,7 @@ func (n *Node) handlePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := n.receive(req.HLC, req.Tracks); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		refuse(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -683,8 +683,15 @@ func (n *Node) decode(w http.ResponseWriter, r *http.Request, v interface{ from(
 	if errors.As(err, &tooBig) {
 		status = http.StatusRequestEntityTooLarge
 	}
-	http.Error(w, fmt.Sprintf("%s: %v", r.URL.Path, err), status)
+	refuse(w, fmt.Sprintf("%s: %v", r.URL.Path, err), status)
 	return false
+}
+
+// refuse answers with an error. The message can carry what the sender wrote (a
+// sender id, an unknown field's name), so it is cut to 300 characters rather
+// than echoed whole.
+func refuse(w http.ResponseWriter, msg string, status int) {
+	http.Error(w, fmt.Sprintf("%.300s", msg), status)
 }
 
 // decodeOne reads one JSON value, refusing unknown fields and anything but

@@ -973,3 +973,26 @@ func TestTrailingContentAfterAMessageIsRefused(t *testing.T) {
 		})
 	}
 }
+
+// An error can carry what the sender wrote, a sender id or an unknown field's
+// name, so a refusal must not echo it whole.
+func TestARefusalDoesNotEchoAHugeInput(t *testing.T) {
+	n, srv := newLoneNode(t)
+	for _, body := range []string{
+		`{"from":"` + strings.Repeat("x", 1<<20) + `","hlc":{"w":1,"l":0},"tracks":{}}`,
+		`{"from":"b","hlc":{"w":1,"l":0},"tracks":{},"` + strings.Repeat("x", 1<<20) + `":1}`,
+	} {
+		resp, err := http.Post(srv.URL+"/push", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		msg, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest || len(msg) > 1500 {
+			t.Fatalf("status %d with a %d byte body, want 400 and under 1500", resp.StatusCode, len(msg))
+		}
+	}
+	if got := n.Counters().Rejected; got != 2 {
+		t.Fatalf("rejected = %d, want 2", got)
+	}
+}
