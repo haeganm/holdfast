@@ -137,6 +137,10 @@ mutants=(
   "node checks drift against true time, not its own clock|internal/node/node.go|s/error \{\n\tlimit := n\.physNow\(\)/error {\n\tlimit := n.trueNow()/"
   "the startup hold ends on true time, not the node's own clock|internal/node/node.go|s/if n\.physNow\(\)\.UnixMilli\(\) < n\.holdUntilMS \{/if n.trueNow().UnixMilli() < n.holdUntilMS {/"
   "state reports the skewed clock as true time|internal/node/node.go|s/NowMS: n\.trueNow\(\)/NowMS: n.physNow()/"
+  "ingest_lost counts an older report that lost|internal/node/node.go|s/case !won && prev\.Obs\.ObservedAtMS < obs\.ObservedAtMS:/case !won:/"
+  "a stale merge counts as applied|internal/node/node.go|s/n\.c\.mergeStale\.Add\(1\)/n.c.mergeApplied.Add(1)/"
+  "receive merges before advancing its clock|internal/node/node.go|s/\tn\.clock\.Update\(high\)\n\tfor id, t := range tracks \{/\t_ = high\n\tfor id, t := range tracks {/"
+  "receive advances its clock only to the message stamp|internal/node/node.go|s/\tfor _, t := range tracks \{\n\t\tif t\.TS\.Compare\(high\) > 0 \{\n\t\t\thigh = t\.TS\n/\tfor _, t := range tracks {\n\t\tif t.TS.Compare(high) > 0 {\n\t\t\tcontinue\n/"
 )
 
 work="$(mktemp -d)"

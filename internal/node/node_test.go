@@ -424,6 +424,45 @@ func TestMergeRegressCountsAStaleWinner(t *testing.T) {
 	}
 }
 
+// ingest_lost is the clock-skew sweep's headline for the wall-clock baseline,
+// so it must count only a local report that lost while fresher than what is
+// stored. An older report losing to a fresher one is the merge being right.
+func TestIngestLostCountsOnlyAFresherReportLosing(t *testing.T) {
+	n, err := New(Config{ID: "a", Wall: true, Now: func() time.Time { return time.UnixMilli(simStartMS) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := crdt.Track{Obs: obs(simStartMS + 500), TS: hlc.Timestamp{WallMS: simStartMS + 1000}, Origin: "b"}
+	if err := n.receive(stored.TS, map[crdt.ICAO]crdt.Track{"AAAAA1": stored}); err != nil {
+		t.Fatal(err)
+	}
+	n.Ingest("AAAAA1", obs(simStartMS)) // older than what is stored, and stamped below it
+	if got := n.Counters().IngestLost; got != 0 {
+		t.Fatalf("ingest_lost = %d after an older report lost to a fresher one", got)
+	}
+	n.Ingest("AAAAA1", obs(simStartMS+900)) // fresher, and still stamped below it
+	if got := n.Counters().IngestLost; got != 1 {
+		t.Fatalf("ingest_lost = %d after a fresher report lost, want 1", got)
+	}
+}
+
+// merge_applied is the denominator of the published bytes per useful update,
+// so a received track that loses, or is a redelivery, counts as stale.
+func TestALosingOrRedeliveredTrackIsStaleNotApplied(t *testing.T) {
+	n, _ := newLoneNode(t)
+	now := time.Now().UnixMilli()
+	tr := crdt.Track{Obs: obs(2), TS: hlc.Timestamp{WallMS: now}, Origin: "b"}
+	older := crdt.Track{Obs: obs(1), TS: hlc.Timestamp{WallMS: now - 1}, Origin: "b"}
+	for _, t2 := range []crdt.Track{tr, tr, older} {
+		if err := n.receive(t2.TS, map[crdt.ICAO]crdt.Track{"AAAAA1": t2}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if c := n.Counters(); c.MergeApplied != 1 || c.MergeStale != 2 {
+		t.Fatalf("merge_applied=%d merge_stale=%d after a delivery, a redelivery and a loser, want 1 and 2", c.MergeApplied, c.MergeStale)
+	}
+}
+
 // A host that restores tracks into a fresh node (the cloud peer does, on every
 // request) must get a clock past them, or the node's next stamp could sort
 // below what it just loaded. Invalid tracks are refused, not loaded.
