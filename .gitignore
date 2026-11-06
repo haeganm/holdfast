@@ -6,9 +6,8 @@
 /harness/.venv/
 __pycache__/
 /holdfast
-/holdfast.exe
+*.exe
 /gentrace
-/gentrace.exe
 !/results/partial-sweep-sync-9679d12/
 /results/partial-sweep-sync-9679d12/*
 !/results/partial-sweep-sync-9679d12/summary.csv
