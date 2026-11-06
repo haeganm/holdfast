@@ -208,13 +208,20 @@ func TestTrustBoundaryRejectsBadMessages(t *testing.T) {
 	far := hlc.Timestamp{WallMS: nowMS + time.Hour.Milliseconds()}
 	wrap := hlc.Timestamp{WallMS: nowMS, Logical: math.MaxUint32}
 	tooMany := map[crdt.ICAO]crdt.Track{}
+	tooManyVersions := map[crdt.ICAO]crdt.Version{}
 	for i := range maxEntries + 1 {
 		tooMany[crdt.ICAO(fmt.Sprintf("%06X", i))] = good
+		tooManyVersions[crdt.ICAO(fmt.Sprintf("%06X", i))] = crdt.Version{TS: good.TS, Origin: "b"}
 	}
 	withTS := func(tr crdt.Track, ts hlc.Timestamp) crdt.Track { tr.TS = ts; return tr }
 	withLat := func(tr crdt.Track, lat float64) crdt.Track { tr.Obs.Lat = lat; return tr }
+	withLon := func(tr crdt.Track, lon float64) crdt.Track { tr.Obs.Lon = lon; return tr }
 	withOrigin := func(tr crdt.Track, o string) crdt.Track { tr.Origin = o; return tr }
 	now := hlc.Timestamp{WallMS: nowMS}
+	digest, err := json.Marshal(syncRequest{From: "b", HLC: now, Digest: tooManyVersions})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	cases := []struct {
 		name string
@@ -225,13 +232,17 @@ func TestTrustBoundaryRejectsBadMessages(t *testing.T) {
 		{"lowercase aircraft id", "/push", push(map[crdt.ICAO]crdt.Track{"abcdef": good}, now), 400},
 		{"track stamp an hour ahead", "/push", push(map[crdt.ICAO]crdt.Track{"ABCDEF": withTS(good, far)}, now), 400},
 		{"message stamp an hour ahead", "/push", push(map[crdt.ICAO]crdt.Track{"ABCDEF": good}, far), 400},
+		{"negative track stamp", "/push", push(map[crdt.ICAO]crdt.Track{"ABCDEF": withTS(good, hlc.Timestamp{WallMS: -5})}, now), 400},
 		{"logical part that would wrap the clock", "/push", push(map[crdt.ICAO]crdt.Track{"ABCDEF": withTS(good, wrap)}, now), 400},
 		{"more tracks than one message may carry", "/push", push(tooMany, now), 400},
 		{"latitude out of range", "/push", push(map[crdt.ICAO]crdt.Track{"ABCDEF": withLat(good, 200)}, now), 400},
+		{"longitude out of range", "/push", push(map[crdt.ICAO]crdt.Track{"ABCDEF": withLon(good, 200)}, now), 400},
 		{"bad origin", "/push", push(map[crdt.ICAO]crdt.Track{"ABCDEF": withOrigin(good, "B; DROP")}, now), 400},
 		{"unknown field", "/push", []byte(`{"from":"b","hlc":{"w":1,"l":0},"tracks":{},"admin":true}`), 400},
 		{"bad sender id", "/sync", []byte(`{"from":"","hlc":{"w":1,"l":0},"digest":{}}`), 400},
 		{"digest with a bad id", "/sync", []byte(`{"from":"b","hlc":{"w":1,"l":0},"digest":{"zz":{"ts":{"w":1,"l":0},"origin":"b","sum":0}}}`), 400},
+		{"digest with a bad origin", "/sync", []byte(`{"from":"b","hlc":{"w":1,"l":0},"digest":{"ABCDEF":{"ts":{"w":1,"l":0},"origin":"B; DROP","sum":0}}}`), 400},
+		{"more digest entries than one message may carry", "/sync", digest, 400},
 		{"body over 4 MB", "/push", append([]byte(`{"from":"b","tracks":{},"pad":"`), bytes.Repeat([]byte("x"), maxBody)...), 413},
 	}
 	for i, tc := range cases {

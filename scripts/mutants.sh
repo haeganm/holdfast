@@ -130,6 +130,10 @@ mutants=(
   "replay: Read keeps a line's first record and drops the rest|internal/replay/trace.go|s/if strings\.TrimSpace\(text\[dec\.InputOffset\(\):\]\) != \"\" \{/if false {/"
   # W1: the core's ord range, trust boundary, clock offset, counters, replica cap, hold and response refusals
   "Ord pads the logical part too short|internal/crdt/track.go|s/\"%016x%08x\"/\"%016x%x\"/"
+  "node has no digest entry cap|internal/node/node.go|s/if len\(d\) > maxEntries \{/if false {/"
+  "node accepts a negative stamp|internal/node/node.go|s/if ts\.WallMS < 0 \{/if false {/"
+  "node accepts any longitude|internal/node/node.go|s/ \|\| o\.Lon < -180 \|\| o\.Lon > 180//"
+  "node accepts any origin in a digest|internal/node/node.go|s/if !originRe\.MatchString\(v\.Origin\) \{/if false {/"
 )
 
 work="$(mktemp -d)"

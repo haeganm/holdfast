@@ -3,6 +3,7 @@ package node
 import (
 	"bytes"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -34,6 +35,7 @@ func FuzzHandlers(f *testing.F) {
 	f.Add(true, seed(pushRequest{From: "b", HLC: hlc.Timestamp{WallMS: simStartMS + 3_600_000}, Tracks: map[crdt.ICAO]crdt.Track{"BBBBB1": good}}))
 	f.Add(true, []byte(`{"from":"b","hlc":{"w":1700000000000,"l":4294967295},"tracks":{}}`))
 	f.Add(true, []byte(`{"from":"b","hlc":{"w":1,"l":0},"tracks":{"bbbbb1":{"obs":{"lat":91},"ts":{"w":1,"l":0},"origin":"b"}}}`))
+	f.Add(true, seed(pushRequest{From: "b", HLC: ts, Tracks: map[crdt.ICAO]crdt.Track{"BBBBB1": {Obs: crdt.Observation{Lat: 39, Lon: 200}, TS: ts, Origin: "b"}}}))
 	f.Add(false, []byte(`{"from":"b","hlc":{"w":1,"l":0},"digest":{"AAAAA1":{"ts":{"w":-1,"l":0},"origin":"","sum":0}}}`))
 	f.Add(false, []byte(`{"from":"b","hlc":{"w":1e300}}`))
 	f.Add(true, []byte(`{"from":"b"`))
@@ -93,12 +95,32 @@ func FuzzHandlers(f *testing.F) {
 			t.Fatalf("clock at %v, more than 1 ms past the drift bound %d", clk, limit)
 		}
 		for id, tr := range n.tracks.Snapshot() {
-			if err := checkTrack(id, tr, limit); err != nil {
-				t.Fatalf("stored an invalid track %s: %v", id, err)
+			if !validTrack(id, tr, limit) {
+				t.Fatalf("stored an invalid track %s: %+v", id, tr)
 			}
 			if tr.TS.Compare(clk) > 0 {
 				t.Fatalf("stored %s at %v, above the clock %v", id, tr.TS, clk)
 			}
 		}
 	})
+}
+
+// validTrack is the fuzz oracle for "nothing invalid is ever stored", written
+// out here instead of calling checkTrack: an oracle that is the code under
+// test can catch a check that was skipped, never one that was weakened.
+func validTrack(id crdt.ICAO, tr crdt.Track, limitMS int64) bool {
+	ok := len(id) == 6
+	for _, c := range []byte(id) {
+		ok = ok && ('0' <= c && c <= '9' || 'A' <= c && c <= 'F')
+	}
+	ok = ok && 1 <= len(tr.Origin) && len(tr.Origin) <= 32
+	for _, c := range []byte(tr.Origin) {
+		ok = ok && ('a' <= c && c <= 'z' || '0' <= c && c <= '9' || c == '-')
+	}
+	o := tr.Obs
+	for _, f := range []float64{o.AltFt, o.GSKt, o.HeadingDeg} {
+		ok = ok && math.Abs(f) <= math.MaxFloat64 // false for NaN and both infinities
+	}
+	return ok && 0 <= tr.TS.WallMS && tr.TS.WallMS <= limitMS && tr.TS.Logical <= hlc.MaxLogical &&
+		-90 <= o.Lat && o.Lat <= 90 && -180 <= o.Lon && o.Lon <= 180 // false for NaN
 }
