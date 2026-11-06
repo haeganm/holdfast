@@ -40,7 +40,9 @@ def plain_log(ax) -> None:
     """A log axis labelled 0.5, 1, 2, 5 rather than 10^0."""
     fmt = matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:g}")
     ax.yaxis.set_major_formatter(fmt)
-    ax.yaxis.set_minor_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:g}" if f"{v:g}"[0] in "25" else ""))
+    # label the 2s and 5s by their first significant digit, so 0.5 and 0.2 get one too
+    ax.yaxis.set_minor_formatter(matplotlib.ticker.FuncFormatter(
+        lambda v, _: f"{v:g}" if f"{v:g}".lstrip("0.")[:1] in ("2", "5") else ""))
 
 
 def rows(path: Path) -> list[dict]:
@@ -189,49 +191,136 @@ def tables(sync_dir: Path, clock_dir: Path) -> None:
     table(["clock", "skew_ms", "settled", *cols], keys, cols, clock, ["clock", "skew_ms"])
 
 
-SYNC_COLS = ["settle_ms", "prop_p50", "prop_p95", "prop_p99", "prop_unresolved", "stale_p50", "stale_p99",
-             "diverge_mean", "diverge_cut", "catchup_ms", "catchup_merge_ms", "merged_cut", "sync_err_rate",
-             "wire_bytes_per_useful", "ingest_lost", "ingest_regress", "merge_regress", "rejected"]
+# The real-traffic, live and cloud tables, printed exactly as the README shows them.
+
+def num(v: str | None) -> float | None:
+    return None if v in ("", None) else float(v)
 
 
-def real_tables(hour_dir: Path | None, base_dir: Path | None, cloud_dir: Path | None, live_dir: Path | None,
-                sync_dir: Path) -> None:
-    """The newer families' tables, from the same summary.csv files the README cites."""
-    if hour_dir:
-        hour = rows(hour_dir / "summary.csv")
-        print(f"\n{hour_dir / 'summary.csv'}\n")
-        keys = [("mesh", s) for s in ("loss20", "loss50", "partition")]
-        table(["topology", "scenario", "settled", *SYNC_COLS, "feed_delay_p50", "feed_delay_p99"], keys,
-              [*SYNC_COLS, "feed_delay_p50", "feed_delay_p99"], hour, ["topology", "scenario"])
+def fmt(x: float, kind: str) -> str:
+    if kind == "pct":
+        return f"{x * 100:.1f}%".replace(".0%", "%")
+    return f"{round(x)}" if kind == "int" else f"{x:g}"
+
+
+def rcell(rs: list[dict], col: str, kind: str = "ms", agg: str = "median") -> str:
+    """Median (or total) over runs, then min-max; runs where the metric never
+    happened are counted after it, not dropped."""
+    got = sorted(v for v in (num(r[col]) for r in rs) if v is not None)
+    never = len(rs) - len(got)
+    if not got:
+        return "never" if never else ""
+    if agg == "sum":
+        return f"{fmt(sum(got), kind)} ({fmt(got[0], kind)}-{fmt(got[-1], kind)})"
+    m = statistics.median(got)
+    out = fmt(m, kind) if got[0] == got[-1] else f"{fmt(m, kind)} ({fmt(got[0], kind)}-{fmt(got[-1], kind)})"
+    return out + (f", {never} never" if never else "")
+
+
+def pick(rs: list[dict], **kw) -> list[dict]:
+    return [r for r in rs if all(r[k] == str(v) for k, v in kw.items())]
+
+
+def settled(rs: list[dict]) -> str:
+    return f"{sum(r['settled'] == 'True' for r in rs)}/{len(rs)}"
+
+
+def md(header: list[str], lines: list[list[str]]) -> None:
+    print("| " + " | ".join(header) + " |")
+    print("|" + "---|" * len(header))
+    for line in lines:
+        print("| " + " | ".join(line) + " |")
+    print()
+
+
+def real_tables(hour_dir: Path | None, base_dir: Path | None, cloud_dir: Path | None, control_dir: Path | None,
+                live_dir: Path | None, sync_dir: Path) -> None:
+    if hour_dir and base_dir:
+        hour, base = rows(hour_dir / "summary.csv"), rows(base_dir / "summary.csv")
+        print(f"\n{hour_dir / 'summary.csv'}, the no-loss row from {base_dir / 'summary.csv'}\n")
+        conds = [("no loss (8 windows, below)", pick(base, topology="mesh", scenario="loss0", clock="hlc", skew_ms=0))]
+        conds += [(label, pick(hour, scenario=sc)) for label, sc in
+                  (("20% loss", "loss20"), ("50% loss", "loss50"), ("c cut 23.6 s", "partition"))]
+        lines = []
+        for label, rs in conds:
+            live = [r for r in rs if num(r["prop_n"])]  # windows with any report to propagate
+            cut = label.startswith("c cut")
+            lines.append([label, settled(rs), rcell(rs, "settle_ms"), rcell(live, "prop_p50"), rcell(live, "prop_p95"),
+                          rcell(live, "prop_p99"), rcell(live, "prop_unresolved", "pct"), rcell(live, "stale_p50"),
+                          rcell(live, "stale_p99"), rcell(live, "diverge_mean", "pct"),
+                          rcell(rs, "catchup_merge_ms") if cut else "", rcell(rs, "merged_cut") if cut else "",
+                          rcell(rs, "sync_err_rate", "pct"), rcell(live, "wire_bytes_per_useful", "int")])
+            print(f"{label}: {len(rs) - len(live)} windows with nothing to propagate")
+        print()
+        md(["network", "settled", "settle", "prop p50", "prop p95", "prop p99", "never delivered", "staleness p50",
+            "staleness p99", "divergence", "catch-up", "merged during the cut", "sync errors", "bytes per useful update"],
+           lines)
+        fd = [r for r in pick(hour, scenario="loss20") if num(r["feed_delay_p50"]) is not None]
+        print(f"feed delay over the {len(fd)} windows with reports: p50 {rcell(fd, 'feed_delay_p50')}, "
+              f"p99 {rcell(fd, 'feed_delay_p99')}")
+        reg = [num(r["catchup_ms"]) for r in pick(hour, scenario="partition")]
+        print(f"registered catchup_ms: {sum(v is None for v in reg)} of {len(reg)} never completed; median counting "
+              f"those as never: {statistics.median(float('inf') if v is None else v for v in reg)}")
     if base_dir:
         base = rows(base_dir / "summary.csv")
-        print(f"\n{base_dir / 'summary.csv'}: topologies, hybrid clock, no skew\n")
-        keys = [("mesh", "loss0", "hlc", "0")] + [("star", s, "hlc", "0") for s in ("loss0", "loss50", "hubdown")]
-        table(["topology", "scenario", "clock", "skew_ms", "settled", *SYNC_COLS], keys, SYNC_COLS, base,
-              ["topology", "scenario", "clock", "skew_ms"])
-        print(f"\n{base_dir / 'summary.csv'}: clocks, mesh\n")
-        cols = ["ingest_lost", "ingest_regress", "merge_regress", "wrong_final", "prop_p95", "stale_p99", "rejected"]
-        keys = [(c, str(k), "loss0") for c in ("hlc", "wall") for k in REAL_SKEWS]
-        keys += [(c, "4000", s) for s in ("loss20", "partition") for c in ("hlc", "wall")]
-        table(["clock", "skew_ms", "scenario", "settled", *cols], keys, cols, base, ["clock", "skew_ms", "scenario"])
-    if cloud_dir:
-        both = rows(cloud_dir / "summary.csv") + [r for r in rows(sync_dir / "summary.csv") if r["topology"] == "star"]
-        print(f"\n{cloud_dir / 'summary.csv'} against the star rows of {sync_dir / 'summary.csv'}\n")
-        cols = ["settle_ms", "prop_p50", "prop_p95", "prop_p99", "catchup_merge_ms", "merged_cut", "cloud_requests",
-                "cloud_writes", "cloud_won", "cloud_writes_per_report", "commit"]
-        keys = [(t, s) for s in ("loss0", "loss20", "partition") for t in ("star", "cloud")]
-        table(["topology", "scenario", "settled", *cols], keys, cols, both, ["topology", "scenario"])
+        print(f"\n{base_dir / 'summary.csv'}: the central server\n")
+        lines = []
+        for label, topo, sc in (("mesh, no loss", "mesh", "loss0"), ("star, no loss", "star", "loss0"),
+                                ("star, 50% loss", "star", "loss50"), ("star, hub cut 20 s", "star", "hubdown")):
+            rs = pick(base, topology=topo, scenario=sc, clock="hlc", skew_ms=0)
+            lines.append([label, settled(rs), rcell(rs, "prop_p50"), rcell(rs, "prop_p95"),
+                          rcell(rs, "prop_unresolved", "pct"), rcell(rs, "stale_p50"), rcell(rs, "stale_p99"),
+                          rcell(rs, "diverge_mean", "pct"), rcell(rs, "merged_cut") if sc == "hubdown" else "",
+                          rcell(rs, "sync_err_rate", "pct"), rcell(rs, "wire_bytes_per_useful", "int")])
+        md(["configuration", "settled", "prop p50", "prop p95", "never delivered", "staleness p50", "staleness p99",
+            "divergence", "merged during the cut", "sync errors", "bytes per useful update"], lines)
+        print(f"{base_dir / 'summary.csv'}: the clocks, totals over the eight windows, range per window\n")
+        names = {-4000: "4 s slow", -2000: "2 s slow", 2000: "2 s fast", 4000: "4 s fast"}
+        nets = {"loss0": "no loss", "loss20": "20% loss", "partition": "c cut 20 s"}
+        lines = []
+        for label, clock, skews, sc in (("hybrid", "hlc", (-4000, -2000, 2000, 4000), "loss0"),
+                                        ("wall", "wall", (-4000, -2000, 2000), "loss0"), ("wall", "wall", (4000,), "loss0"),
+                                        ("hybrid", "hlc", (4000,), "loss20"), ("wall", "wall", (4000,), "loss20"),
+                                        ("hybrid", "hlc", (4000,), "partition"), ("wall", "wall", (4000,), "partition")):
+            per = [pick(base, clock=clock, skew_ms=k, scenario=sc) for k in skews]
+            cells = []
+            for col in ("ingest_lost", "merge_regress", "wrong_final"):
+                # one row stands for several skews only if they agree window by window
+                assert len({tuple(r[col] for r in sorted(rs, key=lambda r: r["run_id"][-3:])) for rs in per}) == 1, \
+                    (label, sc, col)
+                cells.append(rcell(per[0], col, "n", "sum"))
+            lines.append([label, ", ".join(names[k] for k in skews), nets[sc], *cells])
+        md(["clock", "c's clock", "network", "lost local writes", "merges an older report won",
+            "aircraft wrong at the end"], lines)
+    if cloud_dir and control_dir:
+        cloud, control = rows(cloud_dir / "summary.csv"), rows(control_dir / "summary.csv")
+        reg = [r for r in rows(sync_dir / "summary.csv") if r["topology"] == "star"]
+        print(f"\n{cloud_dir / 'summary.csv'} against the hub: {control_dir / 'summary.csv'} at the same commit, "
+              f"and the star rows of {sync_dir / 'summary.csv'}\n")
+        lines = []
+        for sc, label in (("loss0", "no loss"), ("loss20", "20% loss"), ("partition", "c cut 20 s")):
+            for who, rs in (("in-memory hub, same commit", pick(control, scenario=sc)),
+                            ("cloud peer on DynamoDB Local", pick(cloud, scenario=sc)),
+                            (f"in-memory hub, registered ({reg[0]['commit']})", pick(reg, scenario=sc))):
+                lines.append([label, who, settled(rs), rcell(rs, "prop_p50"), rcell(rs, "prop_p95"), rcell(rs, "prop_p99"),
+                              rcell(rs, "cloud_writes_per_report", "n") if "cloud" in who else ""])
+        md(["network", "relay", "settled", "prop p50", "prop p95", "prop p99", "conditional writes per report"], lines)
     if live_dir:
         live = rows(live_dir / "summary.csv")
         print(f"\n{live_dir / 'summary.csv'}\n")
-        cols = ["aircraft", "ingest_total", "settle_ms", "prop_p50", "prop_p95", "prop_p99", "prop_unresolved",
-                "feed_delay_p50", "feed_delay_p99", "stale_p50", "stale_p99", "catchup_ms", "catchup_merge_ms",
-                "merged_cut", "ingest_regress", "merge_regress", "sensor_errors"]
-        keys = [("mesh", "loss0"), ("mesh", "partition"), ("star", "hubdown")]
-        table(["topology", "scenario", "settled", *cols], keys, cols, live, ["topology", "scenario"])
+        lines = []
+        for topo, sc, label in (("mesh", "loss0", "mesh, no loss"), ("mesh", "partition", "mesh, c cut 20 s"),
+                                ("star", "hubdown", "star, hub cut 20 s")):
+            rs = pick(live, topology=topo, scenario=sc)
+            cut = sc != "loss0"
+            lines.append([label, settled(rs), rcell(rs, "aircraft", "n"), rcell(rs, "prop_p50"), rcell(rs, "prop_p95"),
+                          rcell(rs, "feed_delay_p50"), rcell(rs, "stale_p50"), rcell(rs, "stale_p99"),
+                          rcell(rs, "catchup_merge_ms") if cut else "", rcell(rs, "merged_cut") if cut else ""])
+        md(["configuration", "settled", "aircraft", "prop p50", "prop p95", "feed delay p50", "staleness p50",
+            "staleness p99", "catch-up", "merged during the cut"], lines)
 
 
-def strip(ax, x: float, vals: list[float], color: str, label: str | None) -> None:
+def strip(ax, x: float, vals: Sequence[float], color: str, label: str | None) -> None:
     """Every run as a dot, jittered across a narrow band, plus its median."""
     if not vals:
         return
@@ -242,26 +331,42 @@ def strip(ax, x: float, vals: list[float], color: str, label: str | None) -> Non
                zorder=3, label=label)
 
 
+def save(fig, out: Path, name: str, source: str) -> None:
+    """Save with a source note under the plot, so the image stands on its own."""
+    fig.text(0.01, 0.015, source, color=INK2, fontsize=8, ha="left", va="bottom", linespacing=1.4)
+    fig.tight_layout(rect=(0, 0.015 + 0.035 * (source.count("\n") + 1), 1, 1))
+    fig.savefig(out / name, dpi=150)
+    plt.close(fig)
+
+
+def commit_of(data: list[dict]) -> str:
+    return data[0]["commit"].removesuffix("-dirty")  # the README says why the real-traffic runs carry -dirty
+
+
 def real_latency(hour_dir: Path, base_dir: Path, out: Path) -> None:
     """Propagation p95 on the recorded hour: one dot per window."""
     hour, base = rows(hour_dir / "summary.csv"), rows(base_dir / "summary.csv")
     conds = [("no loss", base, "mesh", "loss0"), ("20% loss", hour, "mesh", "loss20"),
-             ("50% loss", hour, "mesh", "loss50"), ("c cut 20 s", hour, "mesh", "partition"),
-             ("star, no loss", base, "star", "loss0"), ("star, 50% loss", base, "star", "loss50"),
-             ("star, hub cut", base, "star", "hubdown")]
-    fig, ax = plt.subplots(figsize=(9, 4.4))
+             ("50% loss", hour, "mesh", "loss50"), ("c cut 23.6 s", hour, "mesh", "partition"),
+             ("no loss", base, "star", "loss0"), ("50% loss", base, "star", "loss50"),
+             ("hub cut 20 s", base, "star", "hubdown")]
+    fig, ax = plt.subplots(figsize=(9, 4.6))
     for x, (_, data, topo, sc) in enumerate(conds):
-        vals = [float(r["prop_p95"]) / 1000 for r in data if r["topology"] == topo and r["scenario"] == sc
-                and r["clock"] == "hlc" and int(r["skew_ms"]) == 0 and r["prop_p95"] != ""]
-        strip(ax, x, vals, BLUE if topo == "mesh" else ORANGE, None)
+        vals = [float(r["prop_p95"]) / 1000 for r in pick(data, topology=topo, scenario=sc, clock="hlc", skew_ms=0)
+                if r["prop_p95"] != ""]  # a window with nothing to propagate has no p95
+        first = x == 0 or conds[x - 1][2] != topo
+        strip(ax, x, vals, BLUE if topo == "mesh" else ORANGE,
+              ("mesh" if topo == "mesh" else "star, through a hub") if first else None)
+    ax.axvline(3.5, color=GRID, lw=1)
     ax.set_yscale("log")
     plain_log(ax)
     ax.set_xticks(range(len(conds)), [c[0] for c in conds])
     ax.set_ylabel("p95 propagation latency (s, log scale)")
     ax.set_title(REAL_LATENCY_TITLE)
-    fig.tight_layout()
-    fig.savefig(out / "real-latency.png", dpi=150)
-    plt.close(fig)
+    ax.legend(title="median; small dots are windows", loc="upper left", alignment="left")
+    save(fig, out, "real-latency.png",
+         f"Source: results/real-hour and results/real-base summary.csv, commit {commit_of(hour)}.\nNo loss and the "
+         "star: the 8 baseline windows. 20%, 50% and the cut: 58 of the hour's 60 windows (2 had nothing to propagate).")
 
 
 REAL_SKEWS = [-4000, -2000, 2000, 4000]
@@ -270,47 +375,56 @@ REAL_SKEWS = [-4000, -2000, 2000, 4000]
 def real_clock(base_dir: Path, out: Path) -> None:
     """Lost local writes per window on the recorded hour, by clock and skew."""
     data = rows(base_dir / "summary.csv")
-    fig, ax = plt.subplots(figsize=(8, 4))
-    for clock, color, dx, label in (("hlc", BLUE, -0.12, "hybrid logical clock"), ("wall", ORANGE, 0.12, "wall clock")):
+    fig, ax = plt.subplots(figsize=(9, 4.4))
+    for clock, color, dx, label in (("hlc", BLUE, -0.18, "hybrid logical clock"), ("wall", ORANGE, 0.18, "wall clock")):
         for x, sk in enumerate(REAL_SKEWS):
-            vals = [int(r["ingest_lost"]) for r in data if r["clock"] == clock and int(r["skew_ms"]) == sk
-                    and r["scenario"] == "loss0"]
+            rs = sorted(pick(data, clock=clock, skew_ms=sk, scenario="loss0"), key=lambda r: r["run_id"][-3:])
+            vals = [int(r["ingest_lost"]) for r in rs]
             strip(ax, x + dx, vals, color, label if x == 0 else None)
-    ax.set_xticks(range(len(REAL_SKEWS)), [f"{s:+d} ms" for s in REAL_SKEWS])
+            if sum(vals):
+                ax.annotate(f"{sum(vals)} in all; by window\n{', '.join(map(str, vals))}",
+                            xy=(x + dx - 0.18, statistics.median(vals)), ha="right", va="center", color=INK2, fontsize=9)
+    ax.set_xticks(range(len(REAL_SKEWS)), [f"{s // 1000:+d} s" for s in REAL_SKEWS])
     ax.set_xlabel("node c's clock error")
     ax.set_ylabel("local writes lost, per window")
     ax.set_title(REAL_CLOCK_TITLE)
-    ax.legend(loc="upper left")
-    fig.tight_layout()
-    fig.savefig(out / "real-clock.png", dpi=150)
-    plt.close(fig)
+    ax.legend(title="median; small dots are windows", loc="upper left", alignment="left")
+    save(fig, out, "real-clock.png",
+         f"Source: results/real-base/summary.csv (ingest_lost), commit {commit_of(data)}.\nThe mesh with no loss, on "
+         "the same 8 windows of the recorded hour in every configuration.")
 
 
-def cloud_relay(cloud_dir: Path, sync_dir: Path, out: Path) -> None:
-    """The cloud peer against the in-memory hub, same trace and scenarios."""
-    cloud, sync = rows(cloud_dir / "summary.csv"), rows(sync_dir / "summary.csv")
+def cloud_relay(cloud_dir: Path, hub_dir: Path, out: Path) -> None:
+    """The cloud peer against the in-memory hub at the same commit, same trace and scenarios."""
+    cloud, hub = rows(cloud_dir / "summary.csv"), rows(hub_dir / "summary.csv")
     scens = [("loss0", "no loss"), ("loss20", "20% loss"), ("partition", "c cut 20 s")]
-    fig, ax = plt.subplots(figsize=(8, 4))
+    fig, ax = plt.subplots(figsize=(9, 4.4))
     for x, (sc, _) in enumerate(scens):
-        hub = [float(r["prop_p95"]) / 1000 for r in sync if r["topology"] == "star" and r["scenario"] == sc]
-        rel = [float(r["prop_p95"]) / 1000 for r in cloud if r["scenario"] == sc]
-        strip(ax, x - 0.15, hub, ORANGE, "in-memory hub" if x == 0 else None)
-        strip(ax, x + 0.15, rel, AQUA, "cloud peer on DynamoDB" if x == 0 else None)
+        for vals, dx, color, label in (([float(r["prop_p95"]) / 1000 for r in pick(hub, scenario=sc)], -0.17, ORANGE,
+                                        "in-memory hub"),
+                                       ([float(r["prop_p95"]) / 1000 for r in pick(cloud, scenario=sc)], 0.17, AQUA,
+                                        "cloud peer, on DynamoDB Local")):
+            strip(ax, x + dx, vals, color, label if x == 0 else None)
+            if x == 0:  # name the medians the title compares, outside each band; aqua is too light for color alone
+                name, side = ("hub", -1) if color == ORANGE else ("cloud peer", 1)
+                ax.annotate(f"{name} {statistics.median(vals):.2f} s", xy=(x + dx + side * 0.2, statistics.median(vals)),
+                            ha="left" if side > 0 else "right", va="center", color=INK2, fontsize=9)
+    ax.set_xlim(-0.8, 2.45)  # room for the hub's label left of its band
     ax.set_yscale("log")
     plain_log(ax)
     ax.set_xticks(range(len(scens)), [s[1] for s in scens])
     ax.set_ylabel("p95 propagation latency (s, log scale)")
     ax.set_title(CLOUD_TITLE)
-    ax.legend(loc="upper left")
-    fig.tight_layout()
-    fig.savefig(out / "cloud-relay.png", dpi=150)
-    plt.close(fig)
+    ax.legend(title="median; small dots are runs", loc="upper left", alignment="left")
+    save(fig, out, "cloud-relay.png",
+         f"Source: results/cloud and results/star-control summary.csv, commit {commit_of(cloud)}. The synthetic trace, "
+         "star topology, 5 runs each.")
 
 
-# Titles state what the data shows; set them after looking at the figures.
-REAL_LATENCY_TITLE = "Propagation on the recorded hour, one dot per window"
-REAL_CLOCK_TITLE = "Lost local writes on the recorded hour, by clock and skew"
-CLOUD_TITLE = "The cloud relay against the in-memory hub"
+# Titles state what the data shows: each number in one matches its README table.
+REAL_LATENCY_TITLE = "Real traffic: p95 0.62 s with no loss, 1.37 s at 20% loss, 24.8 s at 50%"
+REAL_CLOCK_TITLE = "Clock 4 s fast: the wall clock lost 485 writes in 8 windows, the HLC none"
+CLOUD_TITLE = "The cloud peer costs about 15% at p95 over the hub with no loss, inside the spread"
 
 
 def main() -> None:
@@ -320,6 +434,7 @@ def main() -> None:
     ap.add_argument("--real-hour", type=Path)
     ap.add_argument("--real-base", type=Path)
     ap.add_argument("--cloud", type=Path)
+    ap.add_argument("--star-control", type=Path, help="the in-memory hub at the cloud runs' commit")
     ap.add_argument("--live", type=Path)
     ap.add_argument("--out", type=Path, default=Path("docs"))
     args = ap.parse_args()
@@ -332,12 +447,12 @@ def main() -> None:
         real_latency(args.real_hour, args.real_base, args.out)
         real_clock(args.real_base, args.out)
         wrote += ["real-latency.png", "real-clock.png"]
-    if args.cloud:
-        cloud_relay(args.cloud, args.sync, args.out)
+    if args.cloud and args.star_control:
+        cloud_relay(args.cloud, args.star_control, args.out)
         wrote.append("cloud-relay.png")
     print(f"wrote {', '.join(wrote)} in {args.out}\n")
     tables(args.sync, args.clock)
-    real_tables(args.real_hour, args.real_base, args.cloud, args.live, args.sync)
+    real_tables(args.real_hour, args.real_base, args.cloud, args.star_control, args.live, args.sync)
 
 
 if __name__ == "__main__":

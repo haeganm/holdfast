@@ -1,36 +1,224 @@
 # holdfast
 
-Edge nodes that keep one shared picture of the aircraft around them when the network between them drops packets or cuts out, and a harness that measures how well that works.
+[![ci](https://github.com/haeganm/holdfast/actions/workflows/ci.yml/badge.svg)](https://github.com/haeganm/holdfast/actions/workflows/ci.yml)
 
-Three nodes in Docker each ingest aircraft position reports, keep a replica of the fused picture, and sync by anti-entropy over HTTP while `tc netem` drops packets or cuts a node off. Every number below came out of [`harness/run.py`](harness/run.py), and the predictions it is graded against were committed before the first measured run: [docs/predictions.md](docs/predictions.md) (commit 45f5659).
+Edge nodes that keep one shared picture of the aircraft around them while the network between them drops packets or cuts out, a cloud peer that runs the same merge code in a Go Lambda on DynamoDB, and a harness that measures how well they hold up on real ADS-B traffic.
 
-## What it does
+Three nodes in Docker each take in position reports for their own coverage area, keep a replica of the shared picture, and sync peer to peer by anti-entropy over HTTP while `tc netem` drops packets or cuts a node off. Reports come from a recorded hour of real traffic over Washington DC, from the live feed, or from a synthetic trace with exact ground truth. Every number below traces to a committed file: a `summary.csv` written by [`harness/run.py`](harness/run.py), the recorded trace through [`harness/trace_stats.py`](harness/trace_stats.py), or the AWS run's record in [`results/aws`](results/aws). Each set of predictions was committed before the runs that grade it: [docs/predictions.md](docs/predictions.md) for the synthetic sweep, [docs/predictions-2.md](docs/predictions-2.md) for real traffic, live and the cloud peer.
 
-Each node keeps a map from aircraft to a last-writer-wins register stamped with a hybrid logical clock (HLC). Nodes sync by anti-entropy: send a digest, get back what you are missing, send what the peer is missing. The map is a CRDT, so replicas converge whatever order messages arrive in and however often they are lost or repeated, provided that:
+## Results
+
+- **Real traffic, under loss and partitions.** On an hour of recorded ADS-B over Washington DC (444 aircraft), replayed window by window: under 20% packet loss a report reached every other node in 1.37 s at p95 and all 60 windows converged; after node c was cut off for 23.6 s, every node held everything again within 1.4 s of the heal, in all 60. 50% loss is where request/response sync over TCP breaks: p95 24.8 s, and 27 of 60 windows converged. [Details](#results-the-recorded-hour).
+- **Clocks.** With one node's clock 4 s fast, a wall-clock last-writer-wins map threw away 485 fresh reports across eight windows and ended with 81 aircraft wrong; the hybrid logical clock lost none. The trace alone predicts the wall clock's losses to the unit: 93, 110, 0, 18, 89, 83, 72 and 20, exactly what the harness measured. [Details](#baselines-the-central-server-and-the-clock).
+- **The central-server baseline.** Relaying through a hub cost 2.8 times the mesh's p95 with no loss, and cutting the hub stopped all merging between nodes, where the mesh kept the uncut nodes merging. [Details](#baselines-the-central-server-and-the-clock).
+- **Live, and the cloud peer.** Three nodes on live ADS-B delivered each other's reports in 0.62 s at p95, while the feed itself takes 0.75 s. The cloud peer, the node's own code running per request on DynamoDB, relayed within 15% of an in-memory hub, and deployed on AWS it carried live traffic between three edges at 2.1 s p95, for about a third of a cent. [Live](#results-live-traffic), [cloud](#results-the-cloud-peer).
+- **Predictions first.** Thirteen predictions were committed before these runs: ten held, one held in part, and two failed as worded. Each is graded [below](#predictions-graded-real-traffic-live-and-the-cloud-peer), failures included.
+
+## How it works
+
+```mermaid
+flowchart LR
+  feed[(ADS-B: live from adsb.lol,<br/>or the recorded hour)]
+  harness[harness/run.py:<br/>every node's /state, every 100 ms]
+  obs[Prometheus and Grafana]
+  subgraph mesh[edges, under tc netem]
+    a[edge a] <--> b[edge b]
+    a <--> c[edge c]
+    b <--> c
+  end
+  subgraph aws[AWS, an optional relay]
+    api[API Gateway] --> fn[Go Lambda:<br/>the same node code] --> ddb[(DynamoDB)]
+  end
+  feed --> mesh
+  harness -.-> mesh
+  obs -.-> mesh
+  mesh -. bearer token, https .-> api
+```
+
+Each node keeps a map from aircraft to a last-writer-wins register stamped with a hybrid logical clock (HLC). Nodes sync by anti-entropy: send a digest, get back what you are missing, send what the peer is missing. Merge is a max over a total order (stamp, then origin, then contents), so the map is a CRDT: replicas converge whatever order messages arrive in and however often they are lost or repeated, provided that
 
 - every pair of nodes eventually completes a sync round, directly or through other nodes
 - the spread between the fastest and slowest physical clock stays under the max drift (5 s by default), since a node rejects stamps further ahead of its own clock than that
-- the picture stays at or under 10,000 aircraft, the most one digest may carry
+- the picture stays at or under 10,000 aircraft, the most one digest may carry. An aircraft nobody has reported for 5 minutes expires on every node, which keeps a live picture far below that.
 
-A lost exchange is never retried. The next tick is the retry, 1 s after a round ends (so up to 3 s after a round that hit the 2 s client timeout started), which is safe because every exchange is idempotent.
+A lost exchange is never retried. The next tick is the retry, 1 s after a round ends, which is safe because every exchange is idempotent. A restarted node holds its own reports for the max drift before stamping them, so nothing it stamps can sort below what its previous run wrote.
 
-The two parts worth reading are [`internal/hlc`](internal/hlc/hlc.go) (the clock) and [`internal/crdt`](internal/crdt/track.go) (the map), with their property tests. `scripts/mutants.sh` plants 29 known bugs in a scratch copy (8 in the clock and the map, 8 in the node, 13 in the harness's own arithmetic) and checks that the tests catch every one.
+The cloud peer ([`cloud/`](cloud)) is a node behind API Gateway and a Go Lambda, with the picture in DynamoDB. Each request scans the table, rebuilds a node from it, runs that node's own HTTP handler, and writes back every track that changed with a conditional put that only lets a greater track in. `crdt.Ord` encodes the merge order as a string DynamoDB can compare, so concurrent invocations and retried writes can only move an item up. [`cloud/terraform`](cloud/terraform) creates it on demand with nothing provisioned, so it costs nothing while idle. Edges send it a bearer token through `-cloud-peer`, which sends the token to that host only, and only over https or to a private address.
+
+[docs/DESIGN.md](docs/DESIGN.md) has the layers, every invariant with the test that enforces it, and what happens under each kind of failure.
 
 ## Setup
 
-Three edge nodes, 40 synthetic aircraft, one report per aircraft per second, 60 km coverage circles (16 of the 40 aircraft are seen by two nodes), 50 s of ingest, then 10 s to settle. Partitions run from 20 s to 40 s. The harness polls every node's `/state` every 100 ms over a control network netem never touches. Two topologies:
+Three edge nodes with 60 km coverage circles. a sits 69 km from each of the other two, so it overlaps both, and b and c (138 km apart) don't overlap at all. The harness polls every node's `/state` every 100 ms over a control network netem never touches. Topologies:
 
 - **mesh**: every edge syncs with every other edge
 - **star**: edges sync only with a hub that has no coverage of its own, the central-server baseline
+- **cloud**: the star, with the cloud peer on DynamoDB Local as its hub
+
+Where reports come from:
+
+- **The recorded hour**: [`traces/adsb-2026-11-05.jsonl.gz`](traces/adsb-2026-11-05.jsonl.gz), from adsb.lol, 2026-11-05 18:17 to 19:17 UTC. 28,160 reports of 444 aircraft, 71% of them seen by two or more sensors. Each sensor heard its circle about every 9 s, and the feed's delay from observation to receipt was 0.89 s median and 22 s at p99, mostly aircraft on the ground, whose positions update rarely: 76% of the reports over 20 s old were on the ground or moving under 40 kt. Under the ODbL, see [traces/NOTICE](traces/NOTICE).
+- **Live**: each edge polls adsb.lol for its own circle every 18 s, the three 6 s apart.
+- **Synthetic**: [`traces/seed1.jsonl`](traces/seed1.jsonl), 40 aircraft reporting once a second, 16 of them seen by two nodes. Ground truth is exact, and two nodes that cover an aircraft ingest the identical report at the same moment.
+
+Scenarios: no loss, 20% and 50% i.i.d. loss, 20% bursty loss (Gilbert-Elliott), node c cut off from 40% to 80% of the ingest window, and the star's hub (or the cloud peer) cut off over the same span. netem drops on egress, so a loss rate applies once per hop in each direction.
 
 Metrics, defined in the [`run.py`](harness/run.py) docstring:
 
-- **propagation latency**: for each report made after a 3 s warm-up and each other edge node, time until that node holds the report or something fresher (100 ms resolution). Percentiles are over the reports that arrived. **never delivered** is the share that had not arrived by the end of the run, and was added after the predictions, when a review found the percentiles were silently leaving those out.
-- **settle**: after ingest stops, time until every node's replica hash is equal
-- **recovery**: after a partition heals, time until the p95 lag over all nodes and aircraft is back at or below its worst value before the cut (the registered definition). `recover_all` is stricter (every node, every aircraft, held for 2 s) and was added after the predictions were registered.
-- **wire bytes per report**: bytes the mesh interfaces sent during ingest, headers and retransmits included, divided by reports ingested. netem drops packets before the interface counts them, so under loss this counts what got onto the wire, not what was attempted.
+- **time to convergence**: `settle_ms`, from ingest stopping until every node's replica hash is equal; after a partition, `catchup_merge_ms`, from the heal until every edge holds everything any edge held at the heal
+- **divergence**: at each poll, the share of aircraft on which the edges don't all hold the same value
+- **staleness**: age of information. At each poll, for each edge and each aircraft some edge reported in the last 5 s, how old the observation it holds is. p50 and p99.
+- **bytes per useful update**: bytes on the mesh interfaces during ingest, headers and retransmits included, divided by merges that changed some node's picture
+- **propagation latency**: for each report and each other edge, the time until that node holds the report or something fresher. On real traffic it counts from the report's first receipt by any node, so the feed's own delay, reported on its own, doesn't count against sync.
+- **lost local writes** (`ingest_lost`): a node's fresh report lost a merge to an older one. Under the HLC this can't happen.
 
-## Results: sync under loss and partitions
+## Results: the recorded hour
+
+Source: [`results/real-hour/summary.csv`](results/real-hour/summary.csv), commit 4848211: the mesh under the hybrid clock, under 20% loss, 50% loss and a cut of node c, each condition replaying all 60 windows of 59 s (3,540 s of the 3,582 s recording). c is cut from 40% to 80% of each window, 23.6 s. The no-loss row is the mesh on the eight baseline windows below. Two windows, 649 to 708 s and 885 to 944 s, have nothing to propagate (no reports at all in the first, 52 from a single sensor in the second: the feed was refusing the recorder), so the propagation, staleness, divergence and bytes columns are over the other 58. Medians, with min-max over windows; times in ms.
+
+| network | settled | settle | prop p50 | prop p95 | prop p99 | never delivered | staleness p50 | staleness p99 | divergence | catch-up | merged during the cut | sync errors | bytes per useful update |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| no loss (8 windows, below) | 8/8 | 55.5 (15-64) | 411.5 (240-601) | 618.5 (446-824) | 620.5 (446-824) | 0% | 3018 (1709-3185) | 10196 (3097-37070) | 5.8% (2.1%-33.3%) |  |  | 0% | 2306 (1899-4195) |
+| 20% loss | 60/60 | 55 (5-944) | 644 (401-1121) | 1368.5 (763-3320) | 1508.5 (763-3320) | 0% | 3205.5 (2343-3409) | 12010 (4811-40740) | 7.3% (0.4%-45.8%) |  |  | 4.8% (0.8%-8.6%) | 2555 (1168-11665) |
+| 50% loss | 27/60 | 1329 (1-9407), 33 never | 6158.5 (2866-14712) | 24817 (6774-57647) | 25548.5 (6774-62492) | 4.3% (0%-54.5%) | 4715.5 (2422-6850) | 31765 (4867-55698) | 76% (14.1%-100%) |  |  | 75.1% (39.1%-89.1%) | 1505 (777-4087) |
+| c cut 23.6 s | 60/60 | 40.5 (0-297) | 385 (84-3073) | 17823.5 (260-21672) | 20830 (376-24674) | 0% (0%-0.9%) | 3328.5 (2269-3968) | 23220.5 (4767-46744) | 32.2% (0.2%-69.2%) | 802 (0-1323) | 98.5 (0-234) | 7.9% (7.9%-8%) | 2641 (1253-10732) |
+
+![Propagation on the recorded hour, one dot per window](docs/real-latency.png)
+
+What the data says:
+
+- **20% loss costs about 0.75 s at p95.** A report reached every other node in 1.37 s at p95, against 0.62 s with no loss, and every window settled within 10 s of ingest stopping.
+- **50% loss is where it breaks, on real traffic as on the synthetic trace.** p95 rose to 24.8 s, three quarters of sync rounds failed, and fewer than half the windows settled (27 of 60). It is worse than the synthetic trace's 16.6 s, as predicted: a round here carries a digest of about 108 aircraft instead of 40, so more packets have to get through.
+- **A cut node is caught up in under 1.4 s.** After the 23.6 s cut, every edge held everything any edge had held at the heal within 802 ms (median), 1323 ms at worst, in all 60 windows. Through the cut, a and b kept merging each other's reports (98.5 tracks, median).
+- **The registered catch-up column asks more than sync can give.** `catchup_ms` waits until every edge holds an observation at least as new as the newest made before the heal, and last-writer-wins can keep a later write of an older observation, so in 21 of 60 windows it never completed while every edge held the same value. Its median, counting those as never, is still 1157 ms.
+- **Staleness is mostly the sensors, not the sync.** What a node holds is 3.2 s old at the median under 20% loss (3.0 s with no loss): each sensor hears its circle about every 9 s, and the feed takes 0.88 s at the median to deliver a position.
+
+
+### Baselines: the central server and the clock
+
+Source: [`results/real-base/summary.csv`](results/real-base/summary.csv), commit 4848211: eight windows of 50 s, one every 7.5 minutes. Every configuration replays the same eight windows, so a difference between configurations is not a difference in traffic. Medians, with min-max over windows; times in ms.
+
+| configuration | settled | prop p50 | prop p95 | never delivered | staleness p50 | staleness p99 | divergence | merged during the cut | sync errors | bytes per useful update |
+|---|---|---|---|---|---|---|---|---|---|---|
+| mesh, no loss | 8/8 | 411.5 (240-601) | 618.5 (446-824) | 0% | 3018 (1709-3185) | 10196 (3097-37070) | 5.8% (2.1%-33.3%) |  | 0% | 2306 (1899-4195) |
+| star, no loss | 8/8 | 1137.5 (970-1290) | 1731.5 (1196-1888) | 0% | 3414.5 (1740-3536) | 11506 (3082-40184) | 18.6% (6.1%-64.7%) |  | 0% | 858 (720-1459) |
+| star, 50% loss | 0/8 | 9031 (5988-15876) | 23035 (10159-48882) | 54.5% (43.6%-71.4%) | 4852.5 (1709-4978) | 30741.5 (3048-49215) | 99.6% (99%-100%) |  | 61.4% (28.2%-74.7%) | 818 (557-1028) |
+| star, hub cut 20 s | 8/8 | 4751 (629-6026) | 19591.5 (1294-20998) | 0% (0%-0.2%) | 4045.5 (1687-4332) | 24354.5 (3103-40159) | 64.5% (5.5%-77.8%) | 0 | 12.7% (11.5%-12.8%) | 775 (607-1151) |
+
+- **A central server costs 2.8x with no loss**: p95 1.73 s against the mesh's 0.62 s, and slower in all eight windows.
+- **Cutting the hub stops everything**: no edge merged anything from another for the whole cut, in all eight windows.
+- **At 50% loss through a hub, more than half of all deliveries never happen** (54.5%, median), and no window settled.
+- **The mesh pays 2.7 times the bytes per useful update** (2,306 against 858): every round carries the versions of the whole picture whether anything changed or not, and the mesh runs twice as many rounds as the star (every pair syncs both ways, against one round per edge with the hub). Paged or Merkle-range digests would cut it (see [docs/DESIGN.md](docs/DESIGN.md)).
+
+Clock skew, node c's clock off by the skew, mesh. Totals over the same eight windows, with the range per window:
+
+| clock | c's clock | network | lost local writes | merges an older report won | aircraft wrong at the end |
+|---|---|---|---|---|---|
+| hybrid | 4 s slow, 2 s slow, 2 s fast, 4 s fast | no loss | 0 (0-0) | 20 (0-8) | 4 (0-2) |
+| wall | 4 s slow, 2 s slow, 2 s fast | no loss | 0 (0-0) | 20 (0-8) | 4 (0-2) |
+| wall | 4 s fast | no loss | 485 (0-110) | 2 (0-2) | 81 (0-28) |
+| hybrid | 4 s fast | 20% loss | 0 (0-0) | 20 (0-8) | 4 (0-2) |
+| wall | 4 s fast | 20% loss | 485 (0-110) | 2 (0-2) | 81 (0-28) |
+| hybrid | 4 s fast | c cut 20 s | 0 (0-0) | 187 (0-72) | 4 (0-2) |
+| wall | 4 s fast | c cut 20 s | 181 (0-36) | 245 (0-72) | 81 (0-28) |
+
+Columns are `ingest_lost`, `merge_regress` and `wrong_final` (an aircraft whose final value is older than the freshest observation any edge made).
+
+![Lost local writes on the recorded hour, by clock and skew](docs/real-clock.png)
+
+What the data says:
+
+- **The wall clock loses exactly the writes the trace says it must.** With c 4 s fast, a report loses when it lands less than 4 s after c's report of the same aircraft and is fresher than it. [`harness/trace_stats.py`](harness/trace_stats.py) counts those from the trace alone, with no run: 93, 110, 0, 18, 89, 83, 72 and 20 in the eight windows. The harness measured 93, 110, 0, 18, 89, 83, 72 and 20.
+- **Which way the clock is off matters as much as by how much.** With c 4 s slow, or 2 s off either way, the wall clock lost nothing, because of how the sensors take turns: c never reports less than 5.4 s after a, and a never less than 2.67 s after c. On the synthetic trace, where every aircraft reports once a second, 2 s of skew cost 312 to 315 writes a run.
+- **On real traffic the losses cost correctness, not just freshness.** The wall clock ended with 81 aircraft showing an older position than the freshest any node had. The hybrid clock ended with 4, the same 4 as every other configuration: those come from the feed delivering old positions late, which last-writer-wins doesn't fix (it orders writes, not observations). The 20 merges an older report won, under both clocks alike, are the same effect.
+- **Across a partition, both clocks face the same race at the heal.** Writes made on opposite sides of a cut can only be ordered by physical time, and c's runs 4 s fast. So if the first sync round after the heal lands before c's next report, c's older reports beat a's newer ones under either clock, until that next report replaces them about a second later. Both clocks were caught alike in three windows (72, 57 and 48 merges). In window 0 only the wall clock was (68): the hybrid clock's first round after the heal came 1.3 s in, after c had reported again, so c's fresh reports arrived first. What the hybrid clock adds is what happens after contact: it lost no write, where the wall clock lost 181 more outside the cut and ended with 81 aircraft wrong.
+- **20% loss changes nothing here.** Every report still reaches the next node well inside the 2.67 s before the next handoff.
+
+## Predictions, graded: real traffic, live and the cloud peer
+
+Graded against [docs/predictions-2.md](docs/predictions-2.md) as registered (commit d78938d, before any of these runs). Its corrections section records what the file got wrong or left unclear about the trace and the windows, added after the runs; none of it changes a prediction.
+
+| # | prediction | result |
+|---|---|---|
+| 1 | every no-loss and partition run settles; most at 20% loss; fewer than half at 50% | **held**: every no-loss run (80 of 80) and every partition run (60 of 60, and 16 of 16 in the baselines) settled; 20% loss 60 of 60 (16 of 16); 50% loss 27 of 60 in the mesh and 0 of 8 through the star |
+| 2 | propagation p95 rises with loss, and at 50% beats the synthetic 16.6 s | **held**: 618.5 < 1368.5 < 24817 ms (medians), and 24.8 s against the synthetic 16.6 s. At 50% loss 4.3% of deliveries never happened (median, up to 54.5%), which the percentile leaves out; counting them would only raise it |
+| 3 | after the heal, every node holds everything reported before it within 2 s (median) | **held**: 1157 ms by the registered column, counting its 21 never-completed windows as never; in merge order, 802 ms median and 1323 ms at worst, in all 60 windows (see above for why the two differ) |
+| 4 | the star is slower than the mesh with no loss, and with the hub cut the edges merge nothing from each other | **held**: slower in all eight windows (p95 1731.5 against 618.5 ms, medians), and nothing merged between edges during the hub cut in 8 of 8 |
+| 5 | `rejected` and `ingest_lost` are 0 in every hybrid-clock run | **held**: 0 and 0 in all 260 |
+| 6 | regressions above 0 in most windows, at about the trace's rate, under both clocks alike | **held in part.** Above 0 in 38, 35 and 36 of the 60 windows (20%, 50% loss, cut), where the trace has late reports in 41. Not at the trace's rate: about three times it, since one late report counts once at every node that held the newer observation. Alike under both clocks at 4 s slow and 2 s off either way (30 in all, in the same 5 of 8 windows); not at 4 s fast, where the wall clock's count drops to 3 |
+| 7 | the wall clock at -2000 and +2000 ms loses no local write, since no two nodes report an aircraft less than 2.7 s apart | **held**: 0 in all 16 runs. The reason given is true only of the pairs involving c (a then b can be 2.37 s apart, see the corrections), but c is the only node whose clock is off |
+| 8 | the wall clock at +4000 ms loses local writes in every run, on up to 90% of the handoffs from c; at -4000 ms no run does | **failed as worded, held in substance.** At -4000 ms nothing was lost in 8 of 8. At +4000 ms, the window at 900 s lost nothing because the recording has no reports from a or c there, and the losses were 82%, 91%, 46%, 95%, 87%, 80% and 43% of c's handoffs in the other seven, over the 90% bound twice. What does predict them, to the unit, is the trace (93, 110, 0, 18, 89, 83, 72 and 20, measured and modeled alike) |
+| 9 | the hybrid clock loses no local write at any skew; at +4000 ms under 20% loss and across a partition its merge regressions stay below a tenth of the wall clock's lost writes | **failed for the partition.** No local write was lost in any hybrid-clock run. Under 20% loss its merge regressions were the trace's own late reports (20 in all, as with no skew) against the wall clock's 485 lost writes, under a tenth overall though not in two windows where the wall lost little (2 against 18, 4 against 20). Across the partition they were 187 against 181: writes made on opposite sides of a cut can't be ordered better than by physical time, so at the heal both clocks face the same race (above), and the wall clock took 245 such merges on top of its losses |
+| 10 | every cloud run settles, with the cloud peer's table equal to the edges' | **held**: 15 of 15 |
+| 11 | the cloud peer's p95 is above the in-memory hub's, but under twice it with no loss | **held on medians**, against the registered hub and the hub rerun at the cloud's commit alike: 1832 against 1589 and 1600 ms with no loss (1.15 times), 5275 against 4868 and 4946 under 20% loss, 19383 against 19266 and 19326 across the cut. The ranges overlap in all three, so at five runs the extra cost is inside the run-to-run spread |
+| 12 | with no loss the cloud peer makes at most 3 conditional writes per report, and fewer than 1 in 10 lose their condition | **held**: 0.84 to 0.91 writes per report, and 0 to 7.4% lost their condition |
+| 13 | every live run settles; after c's cut every node catches up within 2 s (median); with the hub cut the edges merge nothing | **held**: 9 of 9 settled; catch-up 889 ms (median; the registered column completed in 2 of 3 runs, the merge-order one in all three, 497 to 1522 ms); nothing merged in 3 of 3 hub cuts |
+
+**Kill criterion** (drop the hybrid clock claim if it shows no advantage over the wall clock at any skew on real traffic): **not triggered.** At +4000 ms it lost no writes where the wall clock lost 485, and ended with 4 aircraft wrong against 81.
+
+## Results: live traffic
+
+Source: [`results/live/summary.csv`](results/live/summary.csv), commit 4848211, three runs per configuration on the live feed from 21:44 to 21:55 UTC on 2026-11-05, 93 to 102 aircraft per run. Each edge asks the feed for its circle every 18 s, so its reports arrive a circle at a time. Medians, with min-max over runs; times in ms.
+
+| configuration | settled | aircraft | prop p50 | prop p95 | feed delay p50 | staleness p50 | staleness p99 | catch-up | merged during the cut |
+|---|---|---|---|---|---|---|---|---|---|
+| mesh, no loss | 3/3 | 99 (93-102) | 202 (130-301) | 618 (600-784) | 752 (625-865) | 2841 (2747-2941) | 12880 (12624-18139) |  |  |
+| mesh, c cut 20 s | 3/3 | 100 (96-101) | 414 (332-418) | 11035 (10069-15712) | 663 (647-921) | 3257 (3175-3339) | 21799 (21683-22168) | 889 (497-1522) | 85 (82-93) |
+| star, hub cut 20 s | 3/3 | 98 (95-98) | 5402 (1139-6532) | 22791 (17016-22848) | 756 (674-891) | 3755 (3710-3821) | 22776 (22363-25146) | 2615 (2527-2715) | 0 |
+
+What the data says:
+
+- **Sync isn't the slow part.** With no loss a live report reached the other edges in 0.62 s at p95, about what the synthetic mesh does (0.65 s). The feed took 0.75 s at the median to deliver a position in the first place, and its p99 of about 50 s is positions it hadn't updated for that long (in the recorded hour, three quarters of those were aircraft on the ground).
+- **What a node holds is 2.8 s old at the median**, most of it the feed's own delay and the wait for the next poll (each edge asks every 18 s); sync's share is the 0.2 s median propagation.
+- **A cut node doesn't stop the rest.** With c cut, a and b kept merging each other's reports (85 tracks, median). With the hub cut, the edges merged nothing in all three runs.
+- **Two columns changed after these runs**, recomputed from the committed raw polls with nothing rerun. Propagation was first timed from the aircraft's observation, which put the feed's delay inside it (p95 6.1 to 8.6 s with no loss); it now counts from the first receipt, like the recorded hour. And catch-up is shown in merge order (`catchup_merge_ms`), because in its registered form (`catchup_ms`) it never completed in one c-cut run and one hub-cut run: every edge held the same value, but that value's observation was 2 ms older than another sensor's copy of the same position, and last-writer-wins orders writes, not observations.
+
+## Results: the cloud peer
+
+Source: [`results/cloud/summary.csv`](results/cloud/summary.csv) and [`results/star-control/summary.csv`](results/star-control/summary.csv), both commit 4848211, beside the registered star runs in [`results/sweep-sync/summary.csv`](results/sweep-sync/summary.csv) (commit 5b6bd65). The synthetic trace, the star topology, and the hub replaced by the cloud peer on DynamoDB Local: the code a Lambda runs, scanning the table and writing back with conditional puts on every request. The hub rerun at the same commit shows the code changes since the registered runs didn't move the hub (1600 against 1589 ms at p95 with no loss). Medians, with min-max over five runs; times in ms.
+
+| network | relay | settled | prop p50 | prop p95 | prop p99 | conditional writes per report |
+|---|---|---|---|---|---|---|
+| no loss | in-memory hub, same commit | 5/5 | 1053 (1016-1135) | 1600 (1521-1714) | 1821 (1772-2000) |  |
+| no loss | cloud peer on DynamoDB Local | 5/5 | 1119 (982-1365) | 1832 (1592-2001) | 2013 (1773-2075) | 0.871 (0.838-0.906) |
+| no loss | in-memory hub, registered (5b6bd65) | 5/5 | 1028 (989-1095) | 1589 (1521-1794) | 1788 (1665-1937) |  |
+| 20% loss | in-memory hub, same commit | 5/5 | 1718 (1554-1859) | 4946 (3737-6071) | 7410 (5128-10071) |  |
+| 20% loss | cloud peer on DynamoDB Local | 5/5 | 1824 (1571-1912) | 5275 (3504-6933) | 7312 (4662-9933) | 0.615 (0.582-0.673) |
+| 20% loss | in-memory hub, registered (5b6bd65) | 4/5 | 1634 (1555-1788) | 4868 (3929-8063) | 7701 (5594-10462) |  |
+| c cut 20 s | in-memory hub, same commit | 5/5 | 1337 (1136-1369) | 19326 (19191-19413) | 21916 (21777-21982) |  |
+| c cut 20 s | cloud peer on DynamoDB Local | 5/5 | 1314 (1266-1468) | 19383 (17369-19449) | 21936 (20024-22066) | 0.777 (0.746-0.792) |
+| c cut 20 s | in-memory hub, registered (5b6bd65) | 4/4 | 1240 (1076-1368) | 19266 (18991-19446) | 21859 (21529-21958) |  |
+
+![The cloud peer against the in-memory hub at the same commit](docs/cloud-relay.png)
+
+- **Every run converged with the table equal to the edges** (15 of 15; the cloud peer's own hash is part of the settle check).
+- **The cloud peer costs about 15% at p95 with no loss** (1832 against 1600 ms), 7% under 20% loss and nothing measurable across the cut. At five runs each the ranges overlap in all three conditions.
+- **0.87 conditional writes per report with no loss.** Each changed track is one PutItem; a lost condition (0 to 7.4% of them) is a merge another invocation had already won.
+- These runs predate the edge's token. Every cloud run since sends one, a constant-time compare per request, and the gate's smoke run includes a run through the cloud peer with it.
+
+### Deployed on AWS
+
+Once, for 10 minutes, on 2026-11-06 from 06:13 UTC: [`cloud/terraform`](cloud/terraform) applied in us-east-1, three harness edges on live ADS-B relaying only through the API URL it outputs (`run.py --family aws`), then destroyed, with every service listing nothing afterwards. Source: [`results/aws/summary.csv`](results/aws/summary.csv) for the harness, [`results/aws/aws-run.json`](results/aws/aws-run.json) for the Lambda's own logs and CloudWatch.
+
+| measure | result |
+|---|---|
+| converged, with the table equal to the edges | yes, on the first check |
+| propagation through API Gateway, Lambda and DynamoDB | p50 1.31 s, p95 2.11 s, p99 2.34 s |
+| sync rounds that failed | 1 of 1,659 |
+| Lambda | 1,758 invocations, 0 errors, 0 throttles, at most 3 at once |
+| cold starts | 2, initialising in 74 and 88 ms |
+| Lambda duration | p50 9 ms, p95 35 ms, p99 80 ms, at most 1.5 s; 34 of 128 MB used |
+| DynamoDB | 7,028 read units, 414 write units (one per report, every condition won), 0 throttles |
+| a request without the token | 401 |
+| cost at the listed prices | about $0.003 |
+
+It ran at night over Washington, so the picture held 12 or 13 aircraft against about 100 by day, and each request's table scan was small. A first deployed run 15 minutes earlier is set aside: two of its harness polls timed out, and its Lambda logs were lost to a script bug before the stack went. Its CloudWatch totals are in [`results/aws/first-run-cloudwatch.json`](results/aws/first-run-cloudwatch.json) and its row in `results/aws/summary-before-rerun.csv`. The two runs together came to under a cent at the same prices.
+
+## The synthetic sweep
+
+Three edge nodes, 40 synthetic aircraft each reporting once a second, 16 of them seen by two nodes, 50 s of ingest and then 10 s to settle, partitions from 20 s to 40 s. Ground truth is exact, so this is the controlled experiment the recorded hour is checked against. Its predictions are [docs/predictions.md](docs/predictions.md) (commit 45f5659). Two metrics here are this sweep's own: **recovery** (`recover_p95_ms`, as registered: after a heal, time until the p95 lag over all nodes and aircraft is back at or below its worst value before the cut; `recover_all_ms` is stricter and was added later) and **wire bytes per report** (bytes on the mesh interfaces during ingest divided by reports ingested).
+
+### Sync under loss and partitions
 
 Source: [`results/sweep-sync/summary.csv`](results/sweep-sync/summary.csv), commit 5b6bd65, HLC, no skew. Cells show the median, then min-max over repeats. Times are in ms. "never" means the event did not happen within the run. The sweep was killed at 51 of 55 runs when the PC ran low on memory, so four star configurations have 4 repeats instead of 5. The mean poll interval was 99.9 to 100.1 ms in every run. A median over 4 repeats is the mean of the middle two, hence the .5s.
 
@@ -48,7 +236,7 @@ Source: [`results/sweep-sync/summary.csv`](results/sweep-sync/summary.csv), comm
 | star | c cut 20 s | 4/4 | 1302 (999-1556) | 1240 (1076-1368) | 19266 (18991-19446) | 21859 (21529-21958) | 0 | 2117 (1710-2902) | 3.7% | 456 (455-458) |
 | star | hub cut 20 s | 4/4 | 1215.5 (1137-1455) | 1494 (1425-1578) | 20462.5 (20271-20608) | 22173 (22101-22402) | 0 | 2214.5 (2115-2224) | 12.9% | 352 (351-354) |
 
-Across all 51 runs: 0 lost local writes, 0 merges that replaced a fresher report with an older one, and 0 messages rejected at the trust boundary. 135 requests were cut off in flight by packet loss and counted as aborted (see prediction 7).
+Across all 51 runs: 0 lost local writes, 0 merges that replaced a fresher report with an older one, and 0 messages rejected at the trust boundary. 135 requests were cut off in flight by packet loss and counted as aborted (see the synthetic sweep's prediction 7, below).
 
 ![Propagation latency by network condition](docs/sync-latency.png)
 
@@ -62,7 +250,7 @@ What the data says:
 - **At 50% loss the limit is TCP itself, not the client timeout.** A diagnostic added after the predictions ([`harness/tcp_probe.py`](harness/tcp_probe.py), [`results/tcp-probe/summary.csv`](results/tcp-probe/summary.csv), commit ac9c857, three runs per setting) reran the mesh with the client timeout at 2 s and at 10 s, and read the kernel's TCP counters inside each node over 43 s of ingest. With no loss: 260 rounds completed, 0 failed, 0 new connections, 0 retransmits, because one keep-alive connection per peer carries everything. At 50% loss with the 2 s timeout: 11-12 completed, 77-78 failed, 56-60 new connections and 174-204 SYN retransmits, since a timed-out round drops its connection and the next round has to start with a fresh handshake. Raising the timeout to 10 s cut the failures to 17-21 and the new connections to 17-20, but it did not get more through: 5-14 rounds completed and propagation p95 was 16.5-29.6 s, against 14.7-19.3 s at 2 s. Across the 6 peer links that is about one completed round per link every 20 s at best. The timeout decides how failure shows up, not how much gets through.
 - **During a partition the rest of the mesh keeps working.** While c is cut off, a and b keep merging each other's reports (468 merged tracks, median). When the star's hub is cut, the edges merge nothing at all for the whole cut: 0 in every run.
 
-## Results: clock skew
+### Clock skew
 
 Source: [`results/sweep-clock/summary.csv`](results/sweep-clock/summary.csv), commit 005ce57 (the node code is unchanged from 5b6bd65, only the harness moved), mesh, no loss, node c's physical clock offset by the skew. Five repeats each, all settled. Under each clock the same trace is replayed, and two nodes that cover the same aircraft ingest the same report at the same moment.
 
@@ -88,7 +276,7 @@ What the data says:
 - **The node that loses is always the one whose clock is behind the peer it shares aircraft with.** At -2000 ms that is c, so every lost write is on c. At +2000 ms c runs ahead, so a, on true time, is the slow one: c's older report, stamped ahead, beats a's fresh one, and every lost write is on a. b never loses, because its coverage circle does not overlap c's (138 km apart, 60 km radii), and a loss needs a peer's report of the same aircraft. (Per node counts come from the first and last poll in `raw/*.json.gz`, all 10 runs.)
 - **In this setup the losses cost freshness, not correctness.** No run ended with a wrong value under either clock, because a node that loses a write is holding a peer's report of the same aircraft, and the next report replaces it. At -2000 ms the worst aircraft went 2 to 3 s stale, against 1 s under the HLC. At +2000 ms the worst lag stayed at 1 s. With real sensors, two nodes would not report identical values, and a lost write would be a lost measurement. This trace can't show that.
 
-## Predictions, graded
+### Predictions, graded
 
 | # | prediction | result |
 |---|---|---|
@@ -110,30 +298,61 @@ What the data says:
 
 - **HLC as a struct of wall ms plus a 32-bit logical counter**, rather than packed into one uint64. Readable in JSON and in tests. It costs a few bytes per stamp, and packing stays possible later. The logical part is capped at 2^20: past that the clock moves to the next millisecond instead of wrapping, and a node rejects any stamp over the cap.
 - **Stdlib HTTP and JSON, digest anti-entropy**, rather than gossip (memberlist) or a binary encoding. No dependencies, and every message can be read with curl. The cost shows at 50% loss: a request and response over TCP rarely finish when half the packets drop, whatever the timeout (measured above).
-- **A synthetic trace**, rather than recorded ADS-B. Ground truth has to be exact for propagation and lag to mean anything, and committing community-collected traffic data brings share-alike licensing into the repo. A recorded-traffic adapter can emit the same JSONL later.
+- **A synthetic trace and recorded traffic, both.** The synthetic trace has exact ground truth, so propagation and lag mean exactly what they say; the recorded hour has real timing, which is what decides how much a skewed clock costs. The recording is community data under the ODbL, kept apart in `traces/` with its own notice.
+- **The cloud peer runs the node, not a copy of it.** Each request rebuilds a node from the table and runs its handler, so there is one merge implementation to test. DynamoDB stores a max-register per aircraft through a conditional put on `crdt.Ord`, which makes concurrent invocations safe without locks or transactions.
+
+## Testing
+
+- Property tests on the clock and the map: commutative, associative and idempotent merge, Compare a total order, convergence by digest exchange.
+- `TestSimulation`: three or four nodes in one goroutine on fake clocks, every fault drawn from a seed (lost, delayed, duplicated and cut-off messages, partitions, clock jumps both ways, restarts that wipe a node), invariants checked after every step. A failure replays from its seed. It found two bugs before any measurement saw them.
+- Fuzzing: both sync handlers and the ADS-B parser.
+- `scripts/mutants.sh`: 68 planted bugs in the clock, the map, the node, the edge, the cloud peer, the feed reader and the harness's own arithmetic. The gate fails if the tests miss any, and it checks the unmutated tests pass first.
+- The race detector, `staticcheck` and `govulncheck`.
+- The cloud peer against DynamoDB Local, including concurrent writes, paging, corrupt items and a store failure partway through a request; the Lambda binary in AWS's own runtime image.
+- Terraform: `fmt`, `validate`, 6 plan tests with a mocked provider, a Trivy scan.
+- The harness: 38 tests of its own arithmetic, and a smoke run with a clean run, a partition that has to heal, and a run through the cloud peer with its token.
+
+`./check.sh` runs all of it. CI runs on every push to main and every pull request.
+
+## Observability
+
+`run.py --obs` adds Prometheus, scraping the edges and the hub each second, and a provisioned Grafana dashboard. Here is a partition run, with c cut off:
+
+![Grafana during a partition](docs/grafana-partition.png)
 
 ## Caveats
 
 - All containers share one Docker VM clock, so clock error is injected with a flag (`-clock-offset-ms`), not observed.
-- netem shapes egress only, so a loss rate applies once per hop in each direction.
-- Five repeats per configuration (four for some star runs) is enough to see medians and spread, not to test significance.
-- Recovery and propagation are upper bounds at 100 ms resolution, and lag moves in whole seconds because aircraft report once a second.
-- No authentication or TLS between nodes, so any host that can reach a node can write to it. The digest checksum is 64-bit FNV, which is fine against accidents but not against a peer crafting collisions. Both belong with node identity, a later phase.
+- netem shapes egress only, so a loss rate applies once per hop in each direction. The edges reach the feed and a deployed cloud peer over the control network, which netem never touches.
+- The traffic comes from adsb.lol, a community aggregator, not from an antenna. The parser reads the same `aircraft.json` format an RTL-SDR receiver writes, but no receiver was used. During the recording the feed answered 601 of 669 requests, so the trace has gaps of up to 69 s per sensor, and one of the baseline windows (900 to 950 s) holds no reports from a or c at all.
+- Last-writer-wins merges the picture; it doesn't estimate it. A sensor that hears an old position late can overwrite a newer one, and the harness counts it (`ingest_regress`, `merge_regress`) rather than hiding it.
+- Five repeats per synthetic configuration (four for some star runs) and eight windows per real-traffic baseline show medians and spread, not significance.
+- Propagation, catch-up and recovery are upper bounds at 100 ms resolution, and on the synthetic trace lag moves in whole seconds because aircraft report once a second.
+- No authentication or TLS between edge nodes, so any host that can reach a node can write to it as any origin. The cloud peer has one shared bearer token. The digest checksum is 64-bit FNV, which is fine against accidents but not against a peer crafting collisions. All of this belongs with node identity, the next phase.
+- The cloud peer ran on AWS once, for 10 minutes at night with a dozen aircraft: one run, not a load test, and its cost is computed from AWS's listed prices, since the bill itself lands hours later. [cloud/terraform/README.md](cloud/terraform/README.md) is the runbook.
+- The raw polls behind the recorded-hour runs are not in the repo: they are the 52 MB release asset [recorded-hour-raw](https://github.com/haeganm/holdfast/releases/tag/recorded-hour-raw), SHA-256 `d3b83eff48101827ec2b298c28cc8942a6ed9d57769a3a503306215923c20a3e`. Extracted at the repo root, `--reanalyze` rebuilds both `summary.csv` files byte for byte.
 
 ## Run it
 
 ```
-./check.sh                                                 # gofmt, vet, race tests, mutants, harness tests, Docker smoke
-python -I harness/run.py --family sync --repeats 5         # about 70 s per run
+./check.sh            # gofmt, vet, staticcheck, govulncheck, race tests, fuzzing, mutants, the Lambda in AWS's
+                      # runtime image, Terraform tests and Trivy, harness tests, a Docker smoke run
+python -I harness/run.py --family real-hour --repeats 60   # the recorded hour, 180 runs, about 4 h
+python -I harness/run.py --family real-base --repeats 8    # baselines on 8 windows of it, 128 runs, about 2.6 h
+python -I harness/run.py --family cloud --repeats 5        # the cloud peer on DynamoDB Local as the star's hub
+python -I harness/run.py --family live --repeats 3         # live ADS-B from adsb.lol
+python -I harness/run.py --family sync --repeats 5         # the synthetic sweep, about 70 s per run
 python -I harness/run.py --family clock --repeats 5
-python -I harness/run.py --reanalyze results/sweep-sync    # recompute summary.csv from raw/, no Docker
+python -I harness/run.py --smoke --obs                     # with Prometheus and Grafana on 127.0.0.1:3000
+python -I harness/run.py --reanalyze results/real-hour     # recompute summary.csv from raw/, no Docker
 python -I harness/tcp_probe.py --out results/tcp-probe loss0:2s loss50:2s loss50:10s   # kernel TCP counters mid-run
 pip install -r harness/requirements.txt                    # matplotlib, for plot.py only
-python harness/plot.py --sync results/sweep-sync --clock results/sweep-clock --out docs
+python harness/plot.py --sync results/sweep-sync --clock results/sweep-clock --real-hour results/real-hour \
+    --real-base results/real-base --cloud results/cloud --star-control results/star-control --live results/live --out docs
 ```
 
-`plot.py` also prints the results tables. Needs Go 1.27, Docker with `sch_netem`, and Python 3.12.
+`plot.py` also prints the results tables: the real-traffic, live and cloud ones exactly as they appear here, the synthetic sweep's column by column (the tables here show its sync errors as percentages and round its bytes). Needs Go 1.27, Docker with `sch_netem`, and Python 3.12. Deploying the cloud peer: [cloud/terraform/README.md](cloud/terraform/README.md).
 
 ## License
 
-MIT
+MIT for the code. The recorded trace is under the ODbL ([traces/NOTICE](traces/NOTICE)).

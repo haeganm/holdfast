@@ -21,8 +21,10 @@
   "lambda": {
     "invocations_logged": 1757,
     "cold_starts": 2,
-    "init_ms_median": 81.325,
-    "init_ms_max": 88.36,
+    "init_ms": [
+      74.29,
+      88.36
+    ],
     "duration_ms_p50": 8.65,
     "duration_ms_p95": 35.35,
     "duration_ms_p99": 80.27,
