@@ -36,8 +36,13 @@ step "every image is pinned to one digest, wherever it is named"
 # Dependabot can't see the pins in this file or in scripts/lambda_smoke.py, so a
 # bump elsewhere would leave the gate testing one image and the harness running another.
 split="$(git grep -h -o -E '[a-z0-9./_-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}' -- . ':!results' ':!*.md' \
-  | sed -E 's/:[A-Za-z0-9._-]+@/@/' | sort -u | cut -d@ -f1 | uniq -d)"
+  | sed -E 's#^docker\.io/(library/)?##; s/:[A-Za-z0-9._-]+@/@/' | sort -u | cut -d@ -f1 | uniq -d)"
 [[ -z "$split" ]] || fail "pinned to more than one digest: $split"
+# The check above only compares name:tag@digest forms, so an image named with a
+# tag alone, or a digest alone, would slip past it. Only our own builds go unpinned.
+unpinned="$(git grep -n -E '^\s*(FROM|image:)\s|^[A-Z_]*IMAGE\s*=' -- . ':!results' ':!*.md' \
+  | grep -v -E '[a-z0-9./_-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}|holdfast(-cloud)?:dev' || true)"
+[[ -z "$unpinned" ]] || fail "image without a tag and digest: $unpinned"
 
 step "gofmt (both modules)"
 unformatted="$(gofmt -l .)"
