@@ -106,11 +106,43 @@ def facts(recs: list[dict]) -> None:
     for n in sorted({r["node"] for r in recs}):
         ts = sorted({r["t_ms"] for r in recs if r["node"] == n})
         gaps = sorted(b - a for a, b in zip(ts, ts[1:]))
-        print(f"sensor {n}: {len(ts)} polls, gap median {statistics.median(gaps) / 1000:.1f} s, max {gaps[-1] / 1000:.1f} s")
+        print(f"sensor {n}: {len(ts)} polls, gap median {statistics.median(gaps) / 1000:.1f} s, "
+              f"mean {statistics.mean(gaps) / 1000:.1f} s, max {gaps[-1] / 1000:.1f} s")
     print(f"late reports: {late_reports(recs, 0, span + 1)} of {len(recs) - len(nodes_of)} after each aircraft's first")
+    quiet = quiet_share(recs, 6000)
+    print(f"time in gaps over 6 s with no report from any sensor: {quiet:.0%} (about {60 * quiet:.0f} s a minute)")
+    old = [r for r in recs if r.get("delay_ms", 0) > 20_000]
+    slow = sum(r.get("alt") == 0 or (r.get("gs") or 0) < 40 for r in old)
+    print(f"reports over 20 s old: {len(old)}, {slow / len(old):.0%} of them on the ground or under 40 kt")
+    print("closest handoffs, one sensor's report of an aircraft after another's: " +
+          ", ".join(f"{k} {v / 1000:.2f} s" for k, v in sorted(min_handoffs(recs).items())))
+
+
+def quiet_share(recs: list[dict], over_ms: int) -> float:
+    """Share of the trace's span spent in gaps longer than over_ms with no report at all."""
+    span = recs[-1]["t_ms"]
+    ts = sorted({r["t_ms"] for r in recs})
+    return sum(g for g in (b - a for a, b in zip([0, *ts], ts)) if g > over_ms) / span
+
+
+def min_handoffs(recs: list[dict]) -> dict[str, int]:
+    """The shortest time, per ordered pair of sensors, from one's report of an
+    aircraft to the other's next one: below a wall clock's skew, a handoff can lose."""
+    last: dict[str, dict] = {}
+    best: dict[str, int] = {}
+    for r in recs:
+        p = last.get(r["icao"])
+        if p is not None and p["node"] != r["node"]:
+            k = f"{p['node']}->{r['node']}"
+            best[k] = min(best.get(k, r["t_ms"] - p["t_ms"]), r["t_ms"] - p["t_ms"])
+        last[r["icao"]] = r
+    return best
 
 
 def main() -> int:
+    if len(sys.argv) != 2 or sys.argv[1].startswith("-"):
+        print(__doc__.strip())
+        return 2
     recs = load(Path(sys.argv[1]))
     facts(recs)
     late = [late_reports(recs, lo, hi) for lo, hi in windows("real-hour", 60, h.REAL_HOUR_S * 1000)]

@@ -548,6 +548,14 @@ class TraceStatsTest(unittest.TestCase):
         recs = [self.rec(0, "c"), self.rec(1000, "c"), self.rec(2000, "a"), self.rec(3000, "c"), self.rec(4000, "b")]
         self.assertEqual(ts.handoffs_from(recs, 0, 5000), 2)
 
+    def test_quiet_share_counts_only_gaps_over_the_bound(self):
+        recs = [self.rec(0, "a"), self.rec(5000, "b"), self.rec(12_000, "c"), self.rec(20_000, "a")]
+        self.assertAlmostEqual(ts.quiet_share(recs, 6000), (7000 + 8000) / 20_000)  # the 5 s gap is not quiet
+
+    def test_min_handoffs_are_per_ordered_pair_and_skip_same_sensor_repeats(self):
+        recs = [self.rec(0, "a"), self.rec(1000, "a"), self.rec(4000, "c"), self.rec(6000, "a"), self.rec(9000, "c")]
+        self.assertEqual(ts.min_handoffs(recs), {"a->c": 3000, "c->a": 2000})
+
 
 class CommitLabelTest(unittest.TestCase):
     def test_only_source_changes_make_a_checkout_dirty(self):
