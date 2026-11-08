@@ -14,7 +14,10 @@ RUN CGO_ENABLED=0 go build -tags lambda.norpc -trimpath -ldflags="-s -w" -o /out
 FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
 # iproute2 for tc netem, so the harness can impair the relay's mesh link
 # like any node's; the peer itself runs unprivileged.
+# upgrade takes the trixie-security fixes newer than the pinned base; the
+# image scan in check.sh fails without them.
 RUN apt-get update \
+ && apt-get upgrade -y --no-install-recommends \
  && apt-get install -y --no-install-recommends iproute2 ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/cloud /usr/local/bin/cloud

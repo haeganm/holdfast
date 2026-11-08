@@ -11,7 +11,10 @@ FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f0
 # iproute2 for tc netem, ca-certificates for the live ADS-B feed over HTTPS.
 # The harness runs netem as root through docker exec; the node itself runs
 # unprivileged.
+# upgrade takes the trixie-security fixes newer than the pinned base; the
+# image scan in check.sh fails without them.
 RUN apt-get update \
+ && apt-get upgrade -y --no-install-recommends \
  && apt-get install -y --no-install-recommends iproute2 ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/holdfast /usr/local/bin/holdfast
