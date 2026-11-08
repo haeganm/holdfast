@@ -102,7 +102,9 @@ tf validate -no-color
 tf test -no-color
 
 step "terraform: Trivy misconfiguration scan, with the checks built into the pinned image"
-MSYS_NO_PATHCONV=1 docker run --rm -v "$HERE/cloud/terraform:/tf:ro" -v holdfast-trivycache:/root/.cache/trivy \
+# No cache volume: with --skip-check-update Trivy prefers any checks bundle
+# already in the cache over the embedded ones, and an old run left one there.
+MSYS_NO_PATHCONV=1 docker run --rm -v "$HERE/cloud/terraform:/tf:ro" \
   "$TRIVY_IMAGE" config --exit-code 1 --skip-version-check --skip-check-update --quiet /tf
 
 step "harness unit tests"
