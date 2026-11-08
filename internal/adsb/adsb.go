@@ -199,11 +199,16 @@ func (f Feed) Follow(ctx context.Context, got func([]Report), fail func(error)) 
 			wait = backoff(wait, f.Every, 0)
 		}
 		if err != nil {
+			// A failure waits its whole backoff from now, as logged: counted
+			// from the poll's start, a slow failure would eat most of it and
+			// a Retry-After would be honored early.
 			fail(fmt.Errorf("%w; next poll in %v", err, wait))
+			next = time.Now().Add(wait)
+		} else {
+			// A fixed start-to-start schedule, so a slow response doesn't
+			// stretch the interval; a poll that overran its slot goes at once.
+			next = next.Add(wait)
 		}
-		// A fixed start-to-start schedule, so a slow response doesn't
-		// stretch the interval; a poll that overran its slot goes at once.
-		next = next.Add(wait)
 		if d := time.Until(next); d > 0 {
 			select {
 			case <-ctx.Done():

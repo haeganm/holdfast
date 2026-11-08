@@ -292,6 +292,39 @@ func TestEveryFailedPollBacksOffAndSaysForHowLong(t *testing.T) {
 	}
 }
 
+// A failed poll that took a while, here a feed hanging past the client
+// timeout, must still wait the full backoff it logs before asking again.
+func TestASlowFailureStillWaitsTheBackoffItLogs(t *testing.T) {
+	starts := make(chan time.Time, 16)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		starts <- time.Now()
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var failAt time.Time
+	var logged time.Duration
+	f := Feed{URL: srv.URL, Every: 100 * time.Millisecond, MaxSkew: time.Hour,
+		Client: &http.Client{Timeout: 400 * time.Millisecond}, Now: time.Now}
+	go f.Follow(ctx, func([]Report) {}, func(err error) {
+		if failAt.IsZero() {
+			failAt = time.Now()
+			_, w, _ := strings.Cut(err.Error(), "; next poll in ")
+			logged, _ = time.ParseDuration(w)
+		}
+	})
+	<-starts
+	second := <-starts
+	cancel()
+	if logged != 200*time.Millisecond {
+		t.Fatalf("first failure logged a wait of %v, want 200ms", logged)
+	}
+	if gap := second.Sub(failAt); gap < logged-20*time.Millisecond {
+		t.Fatalf("the next poll came %v after the failure, but the log said %v", gap, logged)
+	}
+}
+
 func TestTheFirstPollGoesAtOnce(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprintf(w, `{"now":%d,"ac":[]}`, time.Now().UnixMilli())

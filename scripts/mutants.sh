@@ -113,6 +113,7 @@ mutants=(
   "adsb: a Retry-After in seconds is not capped|internal/adsb/adsb.go|s/min\(max\(s, 0\), int\(maxRetryAfter\/time\.Second\)\)/max(s, 0)/"
   "adsb: a Retry-After date is not capped|internal/adsb/adsb.go|s/return min\(max\(at\.Sub\(now\), 0\), maxRetryAfter\)/return max(at.Sub(now), 0)/"
   "adsb: only a refusal backs off|internal/adsb/adsb.go|s/\t\tdefault:\n\t\t\twait = backoff\(wait, f\.Every, 0\)/\t\tdefault:\n\t\t\twait = f.Every/"
+  "adsb: a slow failure eats its own backoff|internal/adsb/adsb.go|s/\t\t\tnext = time\.Now\(\)\.Add\(wait\)/\t\t\tnext = next.Add(wait)/"
   "adsb: the first poll waits a whole interval|internal/adsb/adsb.go|s/\twait := f\.Every\n\tfor next := time\.Now\(\); ; \{/\twait := f.Every\n\tselect {\n\tcase <-ctx.Done():\n\t\treturn\n\tcase <-time.After(wait):\n\t}\n\tfor next := time.Now(); ; {/"
   "edge: the cloud token is never wired into the client|cmd/holdfast/main.go|s/client\.Transport = bearer\{/_ = bearer{/"
   "edge: the cloud token goes through a proxy in the clear|cmd/holdfast/main.go|s/\t\t\tdirect\.Proxy = nil\n//"

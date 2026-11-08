@@ -133,15 +133,15 @@ def min_handoffs(recs: list[dict]) -> dict[str, int]:
     for r in recs:
         p = last.get(r["icao"])
         if p is not None and p["node"] != r["node"]:
-            k = f"{p['node']}->{r['node']}"
-            best[k] = min(best.get(k, r["t_ms"] - p["t_ms"]), r["t_ms"] - p["t_ms"])
+            k, gap = f"{p['node']}->{r['node']}", r["t_ms"] - p["t_ms"]
+            best[k] = min(best.get(k, gap), gap)
         last[r["icao"]] = r
     return best
 
 
 def main() -> int:
     if len(sys.argv) != 2 or sys.argv[1].startswith("-"):
-        print(__doc__.strip())
+        print((__doc__ or "").strip())
         return 2
     recs = load(Path(sys.argv[1]))
     facts(recs)
