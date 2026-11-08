@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"net/http"
@@ -207,6 +208,10 @@ func decode(item map[string]types.AttributeValue) (crdt.Track, error) {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&t); err != nil {
 		return t, fmt.Errorf("track: %w", err)
+	}
+	// Anything after the track is refused, as a node refuses it on the wire.
+	if _, err := dec.Token(); err != io.EOF {
+		return t, errors.New("track: unexpected data after it")
 	}
 	if attr(item, "ord") != crdt.Ord(t) {
 		return t, errors.New("ord does not match the track")

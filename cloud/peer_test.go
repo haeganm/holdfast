@@ -246,6 +246,8 @@ func TestABadItemIsSkipped(t *testing.T) {
 	for id, item := range map[string]map[string]types.AttributeValue{
 		"AAAAA2": {"t": &types.AttributeValueMemberS{Value: "{not json"}},
 		"AAAAA3": {"t": &types.AttributeValueMemberS{Value: string(good)}, "ord": &types.AttributeValueMemberS{Value: "zzz"}},
+		// a valid track and ord, with more after the track, as a node refuses on the wire
+		"AAAAA4": {"t": &types.AttributeValueMemberS{Value: string(good) + `{"junk":1}`}, "ord": &types.AttributeValueMemberS{Value: crdt.Ord(track(2, "b"))}},
 	} {
 		item["icao"] = &types.AttributeValueMemberS{Value: id}
 		if _, err := p.db.PutItem(context.Background(), &dynamodb.PutItemInput{TableName: &p.table, Item: item}); err != nil {
@@ -253,8 +255,8 @@ func TestABadItemIsSkipped(t *testing.T) {
 		}
 	}
 	got, _, bad, err := p.load(context.Background())
-	if err != nil || len(bad) != 2 || len(got) != 1 {
-		t.Fatalf("load: %d good, bad %v, %v; want 1 and 2", len(got), bad, err)
+	if err != nil || len(bad) != 3 || len(got) != 1 {
+		t.Fatalf("load: %d good, bad %v, %v; want 1 and 3", len(got), bad, err)
 	}
 	if rec := call(t, p, http.MethodGet, "/state", nil); rec.Code != http.StatusOK {
 		t.Fatalf("state with bad items in the table: %d", rec.Code)
@@ -280,6 +282,13 @@ func TestAValidWriteReplacesABadItem(t *testing.T) {
 		"AAAAA5": {"t": &types.AttributeValueMemberS{Value: "{not json"}, "ord": &types.AttributeValueMemberN{Value: "1"}},
 		"AAAAA6": {"t": &types.AttributeValueMemberS{Value: "{not json"}, "ord": &types.AttributeValueMemberBOOL{Value: false}},
 		"AAAAA7": {"t": &types.AttributeValueMemberS{Value: "{not json"}, "ord": &types.AttributeValueMemberNULL{Value: true}},
+		// every other attribute type DynamoDB has
+		"AAAAA8": {"t": &types.AttributeValueMemberS{Value: "{not json"}, "ord": &types.AttributeValueMemberB{Value: []byte("zzzzzzzz")}},
+		"AAAAA9": {"t": &types.AttributeValueMemberS{Value: "{not json"}, "ord": &types.AttributeValueMemberL{Value: []types.AttributeValue{&types.AttributeValueMemberS{Value: "zzzzzzzz"}}}},
+		"AAAAB1": {"t": &types.AttributeValueMemberS{Value: "{not json"}, "ord": &types.AttributeValueMemberM{Value: map[string]types.AttributeValue{"s": &types.AttributeValueMemberS{Value: "zzzzzzzz"}}}},
+		"AAAAB2": {"t": &types.AttributeValueMemberS{Value: "{not json"}, "ord": &types.AttributeValueMemberSS{Value: []string{"zzzzzzzz"}}},
+		"AAAAB3": {"t": &types.AttributeValueMemberS{Value: "{not json"}, "ord": &types.AttributeValueMemberNS{Value: []string{"1"}}},
+		"AAAAB4": {"t": &types.AttributeValueMemberS{Value: "{not json"}, "ord": &types.AttributeValueMemberBS{Value: [][]byte{[]byte("zzzzzzzz")}}},
 	}
 	valid := map[crdt.ICAO]crdt.Track{}
 	for id, item := range bad {
