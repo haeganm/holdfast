@@ -52,7 +52,7 @@ Credentials come from IAM Identity Center (`aws configure sso --profile holdfast
     export HOLDFAST_CLOUD_URL=$(tf output -raw api_url) HOLDFAST_CLOUD_TOKEN=$TF_VAR_peer_token
     fn=$(tf output -raw function_name) tbl=$(tf output -raw table_name) lg=$(tf output -raw log_group)
     api=${HOLDFAST_CLOUD_URL#https://}; api=${api%%.*}; in=results/aws/inputs
-    curl -s -o /dev/null -w '%{http_code}\n' -X POST "$HOLDFAST_CLOUD_URL/sync"   # no token: must print 401
+    curl -s -o /dev/null -w '%{http_code}\n' -X POST "${HOLDFAST_CLOUD_URL%/}/sync"   # no token: must print 401
     start=$(date +%s000)
     python -I harness/run.py --family aws --repeats 1 --duration 600 --out results/aws
     end=$(date +%s000)
