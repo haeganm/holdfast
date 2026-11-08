@@ -147,6 +147,14 @@ def main() -> int:
     facts(recs)
     late = [late_reports(recs, lo, hi) for lo, hi in windows("real-hour", 60, h.REAL_HOUR_S * 1000)]
     print(f"\nreal-hour windows: late reports in {sum(n > 0 for n in late)} of {len(late)}, {sum(late)} in all")
+    # A run starts empty, so it sees a window's aircraft; a node running all hour
+    # would hold everything reported in the last TTL (5 min).
+    seen = [len({r["icao"] for r in recs if lo <= r["t_ms"] < hi})
+            for lo, hi in windows("real-hour", 60, h.REAL_HOUR_S * 1000)]
+    held = [len({r["icao"] for r in recs if hi - 300_000 <= r["t_ms"] < hi})
+            for _, hi in windows("real-hour", 60, h.REAL_HOUR_S * 1000) if hi >= 300_000]
+    print(f"aircraft a window sees: median {statistics.median(seen)}; a node's full picture at each window's end, "
+          f"past the first 5 min: median {statistics.median(held)}, {min(held)} to {max(held)}")
     print("\nreal-base windows: late reports, and the wall clock's expected lost writes by c's skew")
     for lo, hi in windows("real-base", 8, h.INGEST_S * 1000):
         losses = {k: expected_wall_losses(recs, lo, hi, k) for k in (-4000, -2000, 2000, 4000)}
